@@ -5,6 +5,9 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
+  # Manual dry run: build the TUI + GUI on every OS to validate a release before
+  # tagging. The publish job is gated on a tag (below), so nothing is published.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -263,7 +266,10 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs: [build, bundle-gui]
-    if: ${{ always() && needs.build.result == 'success' }}
+    # Only ever publish on a tag push — a manual dry run builds everything but
+    # skips this job. Runs whenever the TUI build succeeded, even if GUI bundling
+    # failed (a flaky GUI leg then degrades to a TUI-only release).
+    if: ${{ always() && needs.build.result == 'success' && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write   # required to create the Release
