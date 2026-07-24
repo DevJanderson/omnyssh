@@ -25,6 +25,8 @@ development workflow, coding conventions, and review process.
 |------|----------------|---------|
 | Rust | stable (1.76+) | `rustup install stable` |
 | Git  | any recent     | OS package manager |
+| Node.js *(GUI only)* | 20+ | [nodejs.org](https://nodejs.org) or `nvm` |
+| Tauri CLI *(GUI only)* | v2 | `npm i -g @tauri-apps/cli@^2` or `cargo install tauri-cli` |
 
 **Clone and build:**
 
@@ -37,15 +39,19 @@ cargo build
 The first build fetches all dependencies from crates.io and may take a few
 minutes.  Subsequent builds are incremental.
 
-**Repository layout:** the repo is a cargo workspace with two crates:
+**Repository layout:** the repo is a cargo workspace with three crates:
 
 | Crate | Path | Contents |
 |-------|------|----------|
 | `omnyssh-core` | `crates/omnyssh-core` | SSH engine, configs, metrics, domain events, updater — no UI dependencies |
 | `omnyssh` | `crates/omnyssh` | The TUI application (binary `omny`), depends on `omnyssh-core` |
+| `omnyssh-gui` | `crates/omnyssh-gui` | The desktop GUI (Tauri 2 + SvelteKit): Rust IPC in `src/`, the web frontend in `ui/` |
 
-All `cargo` commands below work from the repository root and operate on the
-whole workspace; use `-p omnyssh-core` / `-p omnyssh` to target one crate.
+Bare `cargo build` / `test` / `install` at the root build **core + TUI only**
+(the GUI is excluded via `default-members`), so contributors without the
+Node/Tauri toolchain are unaffected.  All `cargo` commands below work from the
+repository root; use `-p omnyssh-core` / `-p omnyssh` / `-p omnyssh-gui` to
+target one crate.
 
 **Recommended tools:**
 
@@ -79,6 +85,21 @@ During development you can use `cargo watch` to rebuild on every save:
 cargo watch -x run
 ```
 
+### The desktop GUI
+
+The GUI needs the Node/Tauri toolchain (see prerequisites).  From
+`crates/omnyssh-gui`:
+
+```bash
+cd crates/omnyssh-gui/ui && npm ci && cd ..
+
+# Dev: hot-reloads the frontend and rebuilds the Rust side on change
+cargo tauri dev
+
+# Release bundles (.dmg / .AppImage + .deb / .msi|.exe) into target/release/bundle
+cargo tauri build
+```
+
 ---
 
 ## 3. Running tests
@@ -97,6 +118,18 @@ cargo test -p omnyssh-core --test ssh_config_parser
 
 # With output (useful when debugging a failing test)
 cargo test -- --nocapture
+```
+
+### GUI tests
+
+The GUI has its own Rust and frontend suites (not part of the bare workspace
+build):
+
+```bash
+cargo test -p omnyssh-gui                       # Rust IPC / DTO tests
+cd crates/omnyssh-gui/ui
+npm run check                                   # svelte-check + tsc
+npm test                                        # vitest unit tests
 ```
 
 ### Linting

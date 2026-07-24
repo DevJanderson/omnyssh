@@ -7,9 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
-## Unreleased
+## 1.1.0 — 2026-07-24
 
 ### Features
+- **OmnySSH Desktop — a new native GUI app.** A desktop application built on the same engine as the TUI, sharing your `hosts.toml` and `snippets.toml`. It bundles a live metrics dashboard, a multi-session terminal, an SFTP file manager, command snippets, host management, one-click SSH key setup, a command palette, and light/dark themes. Distributed as native installers (macOS `.dmg`, Linux `.AppImage`/`.deb`, Windows `.exe`). The TUI is unchanged and still installs the same ways. macOS builds are unsigned — on first launch right-click the app and choose **Open** (or install via `install.sh`, which sidesteps the Gatekeeper prompt).
 - **File manager hidden-file toggle (`.`)**: show or hide dot-prefixed entries (hidden by default). The `..` parent entry is always shown.
 - **Nerd Font file icons in the file manager**: per-type glyphs replace the `[DIR]`/`[   ]` markers. Requires a Nerd Font — without one the glyphs render as empty boxes.
 
@@ -17,11 +18,15 @@ Versions follow [Semantic Versioning](https://semver.org/).
 - **Terminal next-tab moved from `Tab` to `Ctrl+N`**, freeing `Tab` for the shell's own completion inside the embedded terminal.
 - **File manager `h`/`Left` now navigates to the parent directory** (previously moved the cursor up), matching `ranger`/`lf`/`nnn`/`vifm`. Returning to a parent places the cursor on the directory just left.
 
----
+### Bug Fixes
+- **The terminal now handles Cyrillic and other multibyte text.** OmnySSH forwards a UTF-8 locale (and the `IUTF8` PTY mode) to the remote shell, mirroring a normal ssh client's `SendEnv LANG LC_*`. Previously the session could fall back to a single-byte locale, so line editing corrupted the prompt on Cyrillic input and editors like `vim` rendered mojibake (plain `cat` was fine). Applies to both the TUI and GUI terminals. Best-effort — servers that don't accept forwarded env vars are unaffected.
 
-## 1.1.0 — 2026-06-10
+### Packaging
+- **Release builds now ship the GUI.** CI bundles native desktop installers for macOS (arm64 + x86_64), Linux x86_64 (`.AppImage` + `.deb`), and Windows x86_64, attached to each GitHub Release alongside the TUI archives and covered by `SHA256SUMS`.
+- **`install.sh` can install the TUI, the GUI, or both** via `--tui` / `--gui` / `--both` (or `OMNYSSH_INSTALL=…`); it prompts when run interactively and defaults to the TUI for piped `curl | sh`.
 
 ### Documentation
+- **CONTRIBUTING** now documents the `omnyssh-gui` crate and how to build/test the GUI with the Node/Tauri toolchain.
 - Documented the Auto SSH Key Setup feature (`Shift+K`): added a README Features entry, a Quick Start key reference, and a Help popup shortcut. The feature already existed but was undiscoverable.
 - README "Development Roadmap" now lists the current `1.1.0` release (and `1.0.5`); it previously stopped at `1.0.4`.
 - Removed the dead `connect` keybinding from the `config.toml` example and the `[keybindings]` config struct. Enter-to-connect was always hard-coded, so the field never had any effect.
