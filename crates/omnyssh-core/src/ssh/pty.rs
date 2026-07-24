@@ -70,6 +70,39 @@ fn feed_parser(parser: &Arc<Mutex<vt100::Parser>>, data: &[u8]) {
     }
 }
 
+/// The locale environment to forward to a remote shell: every `LANG`/`LC_*`
+/// variable from `vars`, plus a `LC_CTYPE=C.UTF-8` fallback when none of them
+/// pins the character type. Guarantees a UTF-8 character type so line editing
+/// and editors (vim, less) handle multibyte text (e.g. Cyrillic) instead of
+/// falling back to a single-byte C locale. Pure, so it can be unit-tested;
+/// [`forward_locale`] just relays the result.
+fn locale_env<I>(vars: I) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut out = Vec::new();
+    let mut ctype_pinned = false;
+    for (name, value) in vars {
+        if name == "LANG" || name.starts_with("LC_") {
+            ctype_pinned |= name == "LC_ALL" || name == "LC_CTYPE";
+            out.push((name, value));
+        }
+    }
+    if !ctype_pinned {
+        out.push(("LC_CTYPE".to_string(), "C.UTF-8".to_string()));
+    }
+    out
+}
+
+/// Forwards a UTF-8 locale to the remote shell, mirroring an ssh client's
+/// default `SendEnv LANG LC_*`. Best-effort: servers without `AcceptEnv` ignore
+/// it, so behaviour is unchanged there.
+async fn forward_locale(channel: &russh::Channel<russh::client::Msg>) {
+    for (name, value) in locale_env(std::env::vars()) {
+        let _ = channel.set_env(false, name, value).await;
+    }
+}
+
 /// Opens a channel and requests a remote PTY + shell (the `ssh -t` equivalent).
 async fn open_shell(
     handle: &Handle<KnownHostsHandler>,
@@ -80,8 +113,20 @@ async fn open_shell(
         .channel_open_session()
         .await
         .context("open terminal channel")?;
+    // Sent before the shell starts so it inherits the locale.
+    forward_locale(&channel).await;
+    // IUTF8 tells the server's line discipline that input is UTF-8, so multibyte
+    // (e.g. Cyrillic) editing works in canonical mode. Unknown modes are ignored.
     channel
-        .request_pty(false, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
+        .request_pty(
+            false,
+            "xterm-256color",
+            cols as u32,
+            rows as u32,
+            0,
+            0,
+            &[(russh::Pty::IUTF8, 1)],
+        )
         .await
         .context("request remote pty")?;
     channel
@@ -353,5 +398,45 @@ mod tests {
         let id = mgr.open(&Host::default(), 80, 24, dummy_tx()).unwrap();
         assert!(mgr.parser_for(id).is_some());
         assert!(mgr.parser_for(id + 1).is_none());
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn locale_env_defaults_ctype_to_utf8_when_unset() {
+        // A process with no locale env (e.g. a GUI launched from Finder) still
+        // gets a UTF-8 character type forwarded.
+        let got = locale_env(env(&[("PATH", "/bin"), ("HOME", "/root")]));
+        assert_eq!(got, env(&[("LC_CTYPE", "C.UTF-8")]));
+    }
+
+    #[test]
+    fn locale_env_forwards_lang_and_lc_then_still_defaults_ctype() {
+        let got = locale_env(env(&[
+            ("LANG", "en_US.UTF-8"),
+            ("LC_MESSAGES", "en_US.UTF-8"),
+            ("HOME", "/root"),
+        ]));
+        assert!(got.contains(&("LANG".into(), "en_US.UTF-8".into())));
+        assert!(got.contains(&("LC_MESSAGES".into(), "en_US.UTF-8".into())));
+        // No LC_ALL/LC_CTYPE pinned the character type, so UTF-8 is guaranteed.
+        assert!(got.contains(&("LC_CTYPE".into(), "C.UTF-8".into())));
+    }
+
+    #[test]
+    fn locale_env_respects_an_explicit_ctype() {
+        let got = locale_env(env(&[("LC_CTYPE", "ru_RU.UTF-8")]));
+        assert_eq!(got, env(&[("LC_CTYPE", "ru_RU.UTF-8")]));
+    }
+
+    #[test]
+    fn locale_env_respects_lc_all_and_adds_no_fallback() {
+        let got = locale_env(env(&[("LC_ALL", "C")]));
+        assert_eq!(got, env(&[("LC_ALL", "C")]));
     }
 }
