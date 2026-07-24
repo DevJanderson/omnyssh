@@ -23,7 +23,7 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ### Packaging
 - **Release builds now ship the GUI.** CI bundles native desktop installers for macOS (arm64 + x86_64), Linux x86_64 (`.AppImage` + `.deb`), and Windows x86_64, attached to each GitHub Release alongside the TUI archives and covered by `SHA256SUMS`.
-- **`install.sh` can install the TUI, the GUI, or both** via `--tui` / `--gui` / `--both` (or `OMNYSSH_INSTALL=…`); it prompts when run interactively and defaults to the TUI for piped `curl | sh`.
+- **`install.sh` can install the GUI, the TUI, or both** via `--gui` / `--tui` / `--both` (or `OMNYSSH_INSTALL=…`); it prompts when run interactively and defaults to the GUI (the flagship app) for piped `curl | sh`.
 
 ### Documentation
 - **CONTRIBUTING** now documents the `omnyssh-gui` crate and how to build/test the GUI with the Node/Tauri toolchain.
