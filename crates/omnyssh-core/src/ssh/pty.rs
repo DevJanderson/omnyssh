@@ -70,25 +70,55 @@ fn feed_parser(parser: &Arc<Mutex<vt100::Parser>>, data: &[u8]) {
     }
 }
 
+/// Whether a locale value names the UTF-8 codeset (`en_US.UTF-8`, `ru_RU.utf8`,
+/// `de_DE.UTF-8@euro`, …).
+fn is_utf8_locale(value: &str) -> bool {
+    match value.rsplit_once('.') {
+        Some((_, codeset)) => {
+            let codeset = codeset.split('@').next().unwrap_or(codeset);
+            codeset.eq_ignore_ascii_case("utf-8") || codeset.eq_ignore_ascii_case("utf8")
+        }
+        None => false,
+    }
+}
+
 /// The locale environment to forward to a remote shell: every `LANG`/`LC_*`
-/// variable from `vars`, plus a `LC_CTYPE=C.UTF-8` fallback when none of them
-/// pins the character type. Guarantees a UTF-8 character type so line editing
-/// and editors (vim, less) handle multibyte text (e.g. Cyrillic) instead of
-/// falling back to a single-byte C locale. Pure, so it can be unit-tested;
-/// [`forward_locale`] just relays the result.
+/// variable from `vars`, plus an `LC_CTYPE=C.UTF-8` fallback *only* when the
+/// forwarded set doesn't already resolve the character type to UTF-8. Mirrors an
+/// ssh client's `SendEnv LANG LC_*` while guaranteeing a UTF-8 character type for
+/// a process with no locale env (a GUI launched from Finder) — without clobbering
+/// an already-UTF-8 `LANG` with a `C.UTF-8` the server may not have. Pure, so it
+/// can be unit-tested; [`forward_locale`] just relays the result.
 fn locale_env<I>(vars: I) -> Vec<(String, String)>
 where
     I: IntoIterator<Item = (String, String)>,
 {
     let mut out = Vec::new();
-    let mut ctype_pinned = false;
+    let (mut lc_all, mut lc_ctype, mut lang) = (None, None, None);
     for (name, value) in vars {
         if name == "LANG" || name.starts_with("LC_") {
-            ctype_pinned |= name == "LC_ALL" || name == "LC_CTYPE";
+            match name.as_str() {
+                "LC_ALL" => lc_all = Some(value.clone()),
+                "LC_CTYPE" => lc_ctype = Some(value.clone()),
+                "LANG" => lang = Some(value.clone()),
+                _ => {}
+            }
             out.push((name, value));
         }
     }
-    if !ctype_pinned {
+    // `LC_ALL` overrides every category, so respect the user's explicit choice
+    // verbatim. Otherwise the character type resolves from `LC_CTYPE` then `LANG`;
+    // force UTF-8 only when neither already provides it, replacing a non-UTF-8
+    // `LC_CTYPE` rather than sending a duplicate.
+    let force_utf8 = match lc_all {
+        Some(_) => false,
+        None => !lc_ctype
+            .as_deref()
+            .or(lang.as_deref())
+            .is_some_and(is_utf8_locale),
+    };
+    if force_utf8 {
+        out.retain(|(name, _)| name != "LC_CTYPE");
         out.push(("LC_CTYPE".to_string(), "C.UTF-8".to_string()));
     }
     out
@@ -98,7 +128,12 @@ where
 /// default `SendEnv LANG LC_*`. Best-effort: servers without `AcceptEnv` ignore
 /// it, so behaviour is unchanged there.
 async fn forward_locale(channel: &russh::Channel<russh::client::Msg>) {
-    for (name, value) in locale_env(std::env::vars()) {
+    // `vars_os` (not `vars`) so a non-UTF-8 variable elsewhere in the environment
+    // can't panic this session task; locale values are ASCII, so dropping any
+    // undecodable entry is safe.
+    let vars = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)));
+    for (name, value) in locale_env(vars) {
         let _ = channel.set_env(false, name, value).await;
     }
 }
@@ -408,7 +443,17 @@ mod tests {
     }
 
     #[test]
-    fn locale_env_defaults_ctype_to_utf8_when_unset() {
+    fn is_utf8_locale_recognizes_common_forms() {
+        assert!(is_utf8_locale("en_US.UTF-8"));
+        assert!(is_utf8_locale("ru_RU.utf8"));
+        assert!(is_utf8_locale("de_DE.UTF-8@euro"));
+        assert!(!is_utf8_locale("C"));
+        assert!(!is_utf8_locale("POSIX"));
+        assert!(!is_utf8_locale("en_US.ISO8859-1"));
+    }
+
+    #[test]
+    fn locale_env_defaults_ctype_to_utf8_when_no_locale_env() {
         // A process with no locale env (e.g. a GUI launched from Finder) still
         // gets a UTF-8 character type forwarded.
         let got = locale_env(env(&[("PATH", "/bin"), ("HOME", "/root")]));
@@ -416,26 +461,39 @@ mod tests {
     }
 
     #[test]
-    fn locale_env_forwards_lang_and_lc_then_still_defaults_ctype() {
-        let got = locale_env(env(&[
-            ("LANG", "en_US.UTF-8"),
-            ("LC_MESSAGES", "en_US.UTF-8"),
-            ("HOME", "/root"),
-        ]));
-        assert!(got.contains(&("LANG".into(), "en_US.UTF-8".into())));
-        assert!(got.contains(&("LC_MESSAGES".into(), "en_US.UTF-8".into())));
-        // No LC_ALL/LC_CTYPE pinned the character type, so UTF-8 is guaranteed.
+    fn locale_env_forces_utf8_when_lang_is_not_utf8() {
+        let got = locale_env(env(&[("LANG", "C")]));
+        assert!(got.contains(&("LANG".into(), "C".into())));
         assert!(got.contains(&("LC_CTYPE".into(), "C.UTF-8".into())));
     }
 
     #[test]
-    fn locale_env_respects_an_explicit_ctype() {
+    fn locale_env_keeps_a_utf8_lang_and_adds_no_fallback() {
+        // Regression guard: a working UTF-8 LANG must not be overridden by a
+        // C.UTF-8 the server might not have.
+        let got = locale_env(env(&[
+            ("LANG", "ru_RU.UTF-8"),
+            ("LC_MESSAGES", "ru_RU.UTF-8"),
+        ]));
+        assert!(got.contains(&("LANG".into(), "ru_RU.UTF-8".into())));
+        assert!(got.iter().all(|(k, _)| k != "LC_CTYPE"));
+    }
+
+    #[test]
+    fn locale_env_replaces_a_non_utf8_ctype_without_duplicating() {
+        let got = locale_env(env(&[("LC_CTYPE", "C")]));
+        assert_eq!(got, env(&[("LC_CTYPE", "C.UTF-8")]));
+    }
+
+    #[test]
+    fn locale_env_respects_an_explicit_utf8_ctype() {
         let got = locale_env(env(&[("LC_CTYPE", "ru_RU.UTF-8")]));
         assert_eq!(got, env(&[("LC_CTYPE", "ru_RU.UTF-8")]));
     }
 
     #[test]
-    fn locale_env_respects_lc_all_and_adds_no_fallback() {
+    fn locale_env_respects_lc_all() {
+        // LC_ALL overrides every category, so leave the explicit choice untouched.
         let got = locale_env(env(&[("LC_ALL", "C")]));
         assert_eq!(got, env(&[("LC_ALL", "C")]));
     }
