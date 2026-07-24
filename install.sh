@@ -326,10 +326,12 @@ download_release_asset() {
 
 # Install the GUI desktop app. Returns non-zero when unavailable for the platform.
 install_gui() {
+    # Public GUI asset names (match the release table): macOS keeps the full
+    # target triple, Linux/Windows are x86_64-only so they use the short arch.
     case "$PLATFORM" in
-        apple-darwin)      GUI_ASSET="omnyssh-gui-${TARGET}.dmg" ;;
-        unknown-linux-gnu) GUI_ASSET="omnyssh-gui-${TARGET}.AppImage" ;;
-        pc-windows-msvc)   GUI_ASSET="omnyssh-gui-${TARGET}.exe" ;;
+        apple-darwin)      GUI_ASSET="OmnySSH-${TARGET}.dmg" ;;
+        unknown-linux-gnu) GUI_ASSET="OmnySSH-${ARCH}.AppImage" ;;
+        pc-windows-msvc)   GUI_ASSET="OmnySSH-${ARCH}-setup.exe" ;;
         *)
             print_warning "The desktop GUI is not available for $TARGET (TUI only)."
             return 1
@@ -387,7 +389,7 @@ install_gui_linux() {
     # Prefer the .deb on Debian/Ubuntu — it integrates into the app menu and needs
     # no FUSE. Fall back to the portable AppImage everywhere else.
     if command -v dpkg >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
-        download_release_asset "omnyssh-gui-${TARGET}.deb" || return 1
+        download_release_asset "OmnySSH-${ARCH}.deb" || return 1
         print_info "Installing the .deb package..."
         sudo dpkg -i "$ASSET_PATH" || sudo apt-get install -f -y || {
             print_error "Failed to install the .deb package"
@@ -444,20 +446,20 @@ usage() {
     cat <<EOF
 OmnySSH installer
 
-Usage: install.sh [--tui | --gui | --both]
+Usage: install.sh [--gui | --tui | --both]
 
-  --tui    Install the terminal app 'omny' (default)
-  --gui    Install the desktop GUI app
+  --gui    Install the desktop GUI app (default)
+  --tui    Install the terminal app 'omny'
   --both   Install both
 
-Environment: OMNYSSH_INSTALL=tui|gui|both has the same effect.
-Piped runs (curl | sh) default to --tui; pass a flag with:
-  curl -fsSL .../install.sh | sh -s -- --gui
+Environment: OMNYSSH_INSTALL=gui|tui|both has the same effect.
+Piped runs (curl | sh) default to --gui; pick another with:
+  curl -fsSL .../install.sh | sh -s -- --tui
 EOF
 }
 
 # Decide what to install: CLI flag > OMNYSSH_INSTALL env > interactive prompt >
-# 'tui' default (so an unattended `curl | sh` behaves exactly as before).
+# 'gui' default (the flagship app; the TUI has its own cargo/brew/nix channels).
 select_components() {
     COMPONENTS="${OMNYSSH_INSTALL:-}"
     while [ $# -gt 0 ]; do
@@ -473,15 +475,15 @@ select_components() {
 
     if [ -z "$COMPONENTS" ]; then
         if [ -t 0 ]; then
-            printf "Install which component? [1] TUI (omny)  [2] GUI (desktop)  [3] Both  (default 1): "
+            printf "Install which component? [1] GUI (desktop)  [2] TUI (omny)  [3] Both  (default 1): "
             read -r _choice
             case "$_choice" in
-                2) COMPONENTS="gui" ;;
+                2) COMPONENTS="tui" ;;
                 3) COMPONENTS="both" ;;
-                *) COMPONENTS="tui" ;;
+                *) COMPONENTS="gui" ;;
             esac
         else
-            COMPONENTS="tui"
+            COMPONENTS="gui"
         fi
     fi
 }
@@ -494,7 +496,7 @@ main() {
     echo "╔═══════════════════════════════════════╗"
     echo "║                                       ║"
     echo "║   OmnySSH Installation Script         ║"
-    echo "║   TUI SSH Dashboard & Server Manager  ║"
+    echo "║   SSH Dashboard & Server Manager      ║"
     echo "║                                       ║"
     echo "╚═══════════════════════════════════════╝"
     echo ""
