@@ -164,15 +164,19 @@ jobs:
           - target:  aarch64-apple-darwin
             runner:  macos-latest
             bundles: dmg
+            asset:   OmnySSH-aarch64-apple-darwin
           - target:  x86_64-apple-darwin
             runner:  macos-latest
             bundles: dmg
+            asset:   OmnySSH-x86_64-apple-darwin
           - target:  x86_64-unknown-linux-gnu
             runner:  ubuntu-22.04
             bundles: deb,appimage
+            asset:   OmnySSH-x86_64
           - target:  x86_64-pc-windows-msvc
             runner:  windows-latest
             bundles: nsis
+            asset:   OmnySSH-x86_64
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -223,29 +227,30 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: 1
         run: tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
-      # Rename each produced bundle to a stable, target-tagged name.
+      # Rename each produced bundle to its public release name (matches the README
+      # download table and the URLs install.sh builds).
       - name: Collect bundles (Unix)
         if: runner.os != 'Windows'
         run: |
           out="target/${{ matrix.target }}/release/bundle"
-          for f in "$out"/dmg/*.dmg;           do [ -e "$f" ] && cp "$f" "omnyssh-gui-${{ matrix.target }}.dmg"; done
-          for f in "$out"/appimage/*.AppImage; do [ -e "$f" ] && cp "$f" "omnyssh-gui-${{ matrix.target }}.AppImage"; done
-          for f in "$out"/deb/*.deb;           do [ -e "$f" ] && cp "$f" "omnyssh-gui-${{ matrix.target }}.deb"; done
-          ls -lh omnyssh-gui-*
+          for f in "$out"/dmg/*.dmg;           do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.dmg"; done
+          for f in "$out"/appimage/*.AppImage; do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.AppImage"; done
+          for f in "$out"/deb/*.deb;           do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.deb"; done
+          ls -lh "${{ matrix.asset }}".*
 
       - name: Collect bundles (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $setup = Get-ChildItem "target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
-          Copy-Item $setup.FullName "omnyssh-gui-${{ matrix.target }}.exe"
-          Get-ChildItem omnyssh-gui-*
+          Copy-Item $setup.FullName "${{ matrix.asset }}-setup.exe"
+          Get-ChildItem "${{ matrix.asset }}*"
 
       - name: Upload GUI artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: gui-${{ matrix.target }}
-          path: omnyssh-gui-${{ matrix.target }}.*
+          path: ${{ matrix.asset }}*
           retention-days: 1
           if-no-files-found: error
 
@@ -284,7 +289,7 @@ jobs:
         run: |
           cd artifacts
           shopt -s nullglob
-          sha256sum omny-* omnyssh-gui-* > SHA256SUMS
+          sha256sum omny-* OmnySSH-* > SHA256SUMS
           cat SHA256SUMS
 
       # Extract the current release block from CHANGELOG.md: from the
@@ -319,9 +324,9 @@ jobs:
             artifacts/omny-x86_64-apple-darwin.tar.gz
             artifacts/omny-aarch64-apple-darwin.tar.gz
             artifacts/omny-x86_64-pc-windows-msvc.zip
-            artifacts/omnyssh-gui-aarch64-apple-darwin.dmg
-            artifacts/omnyssh-gui-x86_64-apple-darwin.dmg
-            artifacts/omnyssh-gui-x86_64-unknown-linux-gnu.AppImage
-            artifacts/omnyssh-gui-x86_64-unknown-linux-gnu.deb
-            artifacts/omnyssh-gui-x86_64-pc-windows-msvc.exe
+            artifacts/OmnySSH-aarch64-apple-darwin.dmg
+            artifacts/OmnySSH-x86_64-apple-darwin.dmg
+            artifacts/OmnySSH-x86_64.AppImage
+            artifacts/OmnySSH-x86_64.deb
+            artifacts/OmnySSH-x86_64-setup.exe
             artifacts/SHA256SUMS
