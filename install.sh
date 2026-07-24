@@ -136,9 +136,6 @@ download_and_install() {
 
     print_info "Downloading from: $DOWNLOAD_URL"
 
-    TMP_DIR="$(mktemp -d)"
-    trap 'rm -rf "$TMP_DIR"' EXIT
-
     ARCHIVE_FILE="$TMP_DIR/${ARCHIVE_NAME}.${ARCHIVE_EXT}"
 
     # Download the archive
@@ -294,22 +291,239 @@ install_man_page() {
     fi
 }
 
+# Download a release asset into $TMP_DIR and verify it against SHA256SUMS.
+# Args: <asset-name>. On success sets $ASSET_PATH to the file; returns 1 on failure.
+download_release_asset() {
+    _name="$1"
+    _url="https://github.com/$REPO/releases/download/$VERSION/$_name"
+    ASSET_PATH="$TMP_DIR/$_name"
+    print_info "Downloading $_name..."
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL "$_url" -o "$ASSET_PATH" || { print_error "Download failed: $_name"; return 1; }
+    else
+        wget -qO "$ASSET_PATH" "$_url" || { print_error "Download failed: $_name"; return 1; }
+    fi
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        _sha_check="sha256sum -c -"
+    elif command -v shasum >/dev/null 2>&1; then
+        _sha_check="shasum -a 256 -c -"
+    else
+        _sha_check=""
+    fi
+    if [ -z "$_sha_check" ]; then
+        print_warning "no sha256 tool found — skipping verification"
+    elif curl -fsSL "https://github.com/$REPO/releases/download/$VERSION/SHA256SUMS" -o "$TMP_DIR/SHA256SUMS" 2>/dev/null; then
+        (cd "$TMP_DIR" && grep " ${_name}\$" SHA256SUMS | $_sha_check) || {
+            print_error "Checksum verification failed for $_name"
+            return 1
+        }
+        print_success "Checksum verified"
+    else
+        print_warning "Could not download SHA256SUMS — skipping verification"
+    fi
+}
+
+# Install the GUI desktop app. Returns non-zero when unavailable for the platform.
+install_gui() {
+    # Public GUI asset names (match the release table): macOS keeps the full
+    # target triple, Linux/Windows are x86_64-only so they use the short arch.
+    case "$PLATFORM" in
+        apple-darwin)      GUI_ASSET="OmnySSH-${TARGET}.dmg" ;;
+        unknown-linux-gnu) GUI_ASSET="OmnySSH-${ARCH}.AppImage" ;;
+        pc-windows-msvc)   GUI_ASSET="OmnySSH-${ARCH}-setup.exe" ;;
+        *)
+            print_warning "The desktop GUI is not available for $TARGET (TUI only)."
+            return 1
+            ;;
+    esac
+
+    case "$PLATFORM" in
+        apple-darwin)      install_gui_macos ;;
+        unknown-linux-gnu) install_gui_linux ;;
+        pc-windows-msvc)   install_gui_windows ;;
+    esac
+}
+
+install_gui_macos() {
+    download_release_asset "$GUI_ASSET" || return 1
+    DMG="$ASSET_PATH"
+    print_info "Mounting disk image..."
+    MOUNT=$(hdiutil attach -nobrowse -readonly "$DMG" 2>/dev/null | grep -o '/Volumes/[^ ]*' | tail -n 1 || true)
+    if [ -z "$MOUNT" ]; then
+        print_error "Failed to mount $GUI_ASSET"
+        return 1
+    fi
+    APP=$(find "$MOUNT" -maxdepth 1 -name '*.app' | head -n 1 || true)
+    if [ -z "$APP" ]; then
+        print_error "No .app found in $GUI_ASSET"
+        hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
+        return 1
+    fi
+    APP_NAME=$(basename "$APP")
+    print_info "Installing $APP_NAME to /Applications..."
+    # Guard the copy explicitly: in `--both` mode set -e is suppressed (the call
+    # is left of `||`), so an unguarded failure would fall through to a false
+    # "installed" message. Always detach the image on the way out.
+    _copy_failed=0
+    if [ -w /Applications ]; then
+        rm -rf "/Applications/$APP_NAME"
+        cp -R "$APP" /Applications/ || _copy_failed=1
+    else
+        print_warning "Installing into /Applications requires sudo privileges"
+        sudo rm -rf "/Applications/$APP_NAME"
+        sudo cp -R "$APP" /Applications/ || _copy_failed=1
+    fi
+    hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
+    if [ "$_copy_failed" = "1" ]; then
+        print_error "Failed to copy $APP_NAME to /Applications"
+        return 1
+    fi
+    # The app is unsigned; clearing quarantine lets it open without a Gatekeeper
+    # prompt (a curl download carries none, so this is just belt-and-suspenders).
+    xattr -dr com.apple.quarantine "/Applications/$APP_NAME" 2>/dev/null || true
+    print_success "$APP_NAME installed. Launch it from Applications or Launchpad."
+}
+
+install_gui_linux() {
+    # Prefer the .deb on Debian/Ubuntu — it integrates into the app menu and needs
+    # no FUSE. Fall back to the portable AppImage everywhere else.
+    if command -v dpkg >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+        download_release_asset "OmnySSH-${ARCH}.deb" || return 1
+        print_info "Installing the .deb package..."
+        sudo dpkg -i "$ASSET_PATH" || sudo apt-get install -f -y || {
+            print_error "Failed to install the .deb package"
+            return 1
+        }
+        print_success "OmnySSH installed. Launch it from your application menu."
+        return 0
+    fi
+
+    download_release_asset "$GUI_ASSET" || return 1
+    APPIMAGE="$ASSET_PATH"
+    TARGET_BIN="$INSTALL_DIR/omnyssh"
+    print_info "Installing the AppImage to $TARGET_BIN..."
+    chmod +x "$APPIMAGE"
+    if [ -w "$INSTALL_DIR" ]; then
+        mv "$APPIMAGE" "$TARGET_BIN" || { print_error "Failed to install AppImage to $TARGET_BIN"; return 1; }
+    else
+        sudo mv "$APPIMAGE" "$TARGET_BIN" || { print_error "Failed to install AppImage to $TARGET_BIN"; return 1; }
+        sudo chmod +x "$TARGET_BIN"
+    fi
+    # Best-effort menu integration (no root needed).
+    APPS_DIR="$HOME/.local/share/applications"
+    ICON_DIR="$HOME/.local/share/icons"
+    mkdir -p "$APPS_DIR" "$ICON_DIR"
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/$VERSION/crates/omnyssh-gui/icons/128x128.png" \
+        -o "$ICON_DIR/omnyssh.png" 2>/dev/null || true
+    cat > "$APPS_DIR/omnyssh.desktop" <<EOF
+[Desktop Entry]
+Name=OmnySSH
+Comment=SSH dashboard, terminal, and SFTP file manager
+Exec=$TARGET_BIN
+Icon=omnyssh
+Type=Application
+Categories=Utility;Network;
+Terminal=false
+EOF
+    print_success "OmnySSH installed to $TARGET_BIN and added to your app menu."
+    print_info "AppImages need FUSE; if it won't start, install 'libfuse2' or run with --appimage-extract-and-run."
+}
+
+install_gui_windows() {
+    download_release_asset "$GUI_ASSET" || return 1
+    SETUP="$ASSET_PATH"
+    print_info "Launching the installer..."
+    if command -v cygpath >/dev/null 2>&1; then
+        cmd //c start "" "$(cygpath -w "$SETUP")" || true
+    else
+        "$SETUP" || true
+    fi
+    print_info "Follow the installer prompts — OmnySSH will appear in the Start Menu."
+}
+
+usage() {
+    cat <<EOF
+OmnySSH installer
+
+Usage: install.sh [--gui | --tui | --both]
+
+  --gui    Install the desktop GUI app (default)
+  --tui    Install the terminal app 'omny'
+  --both   Install both
+
+Environment: OMNYSSH_INSTALL=gui|tui|both has the same effect.
+Piped runs (curl | sh) default to --gui; pick another with:
+  curl -fsSL .../install.sh | sh -s -- --tui
+EOF
+}
+
+# Decide what to install: CLI flag > OMNYSSH_INSTALL env > interactive prompt >
+# 'gui' default (the flagship app; the TUI has its own cargo/brew/nix channels).
+select_components() {
+    COMPONENTS="${OMNYSSH_INSTALL:-}"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --tui) COMPONENTS="tui" ;;
+            --gui) COMPONENTS="gui" ;;
+            --both|--all) COMPONENTS="both" ;;
+            -h|--help) usage; exit 0 ;;
+            *) print_warning "Ignoring unknown option: $1" ;;
+        esac
+        shift
+    done
+
+    if [ -z "$COMPONENTS" ]; then
+        if [ -t 0 ]; then
+            printf "Install which component? [1] GUI (desktop)  [2] TUI (omny)  [3] Both  (default 1): "
+            read -r _choice
+            case "$_choice" in
+                2) COMPONENTS="tui" ;;
+                3) COMPONENTS="both" ;;
+                *) COMPONENTS="gui" ;;
+            esac
+        else
+            COMPONENTS="gui"
+        fi
+    fi
+}
+
 # Main installation flow
 main() {
+    select_components "$@"
+
     echo ""
     echo "╔═══════════════════════════════════════╗"
     echo "║                                       ║"
     echo "║   OmnySSH Installation Script         ║"
-    echo "║   TUI SSH Dashboard & Server Manager  ║"
+    echo "║   SSH Dashboard & Server Manager      ║"
     echo "║                                       ║"
     echo "╚═══════════════════════════════════════╝"
     echo ""
 
     detect_platform
     get_latest_release
-    download_and_install
-    install_man_page
-    verify_installation
+
+    # One temp dir for every download; cleaned up on exit.
+    TMP_DIR="$(mktemp -d)"
+    trap 'rm -rf "$TMP_DIR"' EXIT
+
+    case "$COMPONENTS" in
+        gui)
+            install_gui
+            ;;
+        both)
+            download_and_install
+            install_man_page
+            verify_installation
+            install_gui || print_warning "GUI install skipped/failed; the TUI is installed."
+            ;;
+        *)
+            download_and_install
+            install_man_page
+            verify_installation
+            ;;
+    esac
 
     echo ""
     print_success "Installation complete!"
@@ -321,11 +535,16 @@ main() {
     esac
 
     print_info "Next steps:"
-    print_info "  1. Run 'omny' to start the application"
-    print_info "  2. Configure your servers in $CONFIG_DIR"
-    print_info "  3. Check 'man omny' for documentation (Linux/macOS)"
-    print_info "  4. Visit https://github.com/$REPO for more info"
+    if [ "$COMPONENTS" != "gui" ]; then
+        print_info "  1. Run 'omny' to start the terminal app"
+        print_info "  2. Configure your servers in $CONFIG_DIR"
+        print_info "  3. Check 'man omny' for documentation (Linux/macOS)"
+    fi
+    if [ "$COMPONENTS" = "gui" ] || [ "$COMPONENTS" = "both" ]; then
+        print_info "  • Launch the OmnySSH desktop app from your applications menu"
+    fi
+    print_info "  • Visit https://github.com/$REPO for more info"
     echo ""
 }
 
-main
+main "$@"

@@ -5,6 +5,9 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
+  # Manual dry run: build the TUI + GUI on every OS to validate a release before
+  # tagging. The publish job is gated on a tag (below), so nothing is published.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -141,10 +144,132 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  # ── 2b. Build the GUI desktop installers ───────────────────────────────────
+  #
+  # Native Tauri bundles, renamed to stable `omnyssh-gui-<target>.<ext>` names so
+  # install.sh can build download URLs the same way it does for the TUI. macOS
+  # ships unsigned (a documented one-time Gatekeeper bypass). Linux is x86_64 only
+  # — the webkit cross-compile for ARM is out of scope, and ARM/Termux users have
+  # the TUI.
+  #
+  #   macos-latest   → aarch64-apple-darwin   (native)        → .dmg
+  #   macos-latest   → x86_64-apple-darwin    (cross)         → .dmg
+  #   ubuntu-22.04   → x86_64-unknown-linux-gnu                → .deb + .AppImage
+  #   windows-latest → x86_64-pc-windows-msvc                  → NSIS -setup.exe
+  bundle-gui:
+    name: Bundle GUI · ${{ matrix.target }}
+    needs: ci
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target:  aarch64-apple-darwin
+            runner:  macos-latest
+            bundles: dmg
+            asset:   OmnySSH-aarch64-apple-darwin
+          - target:  x86_64-apple-darwin
+            runner:  macos-latest
+            bundles: dmg
+            asset:   OmnySSH-x86_64-apple-darwin
+          - target:  x86_64-unknown-linux-gnu
+            runner:  ubuntu-22.04
+            bundles: deb,appimage
+            asset:   OmnySSH-x86_64
+          - target:  x86_64-pc-windows-msvc
+            runner:  windows-latest
+            bundles: nsis
+            asset:   OmnySSH-x86_64
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/omnyssh-gui/ui/package-lock.json
+
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: gui-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            gui-${{ matrix.target }}-cargo-
+
+      # Tauri v2 build dependencies (webkit2gtk + appindicator; patchelf/file for
+      # the AppImage). Only Linux needs them; macOS/Windows use system webviews.
+      - name: Install Linux bundle dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libssl-dev patchelf file
+
+      - name: Install the Tauri CLI
+        run: npm install -g @tauri-apps/cli@^2
+
+      - name: Install frontend dependencies
+        working-directory: crates/omnyssh-gui/ui
+        run: npm ci
+
+      # `tauri build` runs the frontend build (beforeBuildCommand), compiles the
+      # OmnySSH binary, and packages the requested bundles.
+      - name: Build bundles
+        working-directory: crates/omnyssh-gui
+        env:
+          # Run the AppImage tooling without FUSE, which CI runners lack.
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+      # Rename each produced bundle to its public release name (matches the README
+      # download table and the URLs install.sh builds).
+      - name: Collect bundles (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          out="target/${{ matrix.target }}/release/bundle"
+          for f in "$out"/dmg/*.dmg;           do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.dmg"; done
+          for f in "$out"/appimage/*.AppImage; do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.AppImage"; done
+          for f in "$out"/deb/*.deb;           do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.deb"; done
+          ls -lh "${{ matrix.asset }}".*
+
+      - name: Collect bundles (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem "target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          Copy-Item $setup.FullName "${{ matrix.asset }}-setup.exe"
+          Get-ChildItem "${{ matrix.asset }}*"
+
+      - name: Upload GUI artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gui-${{ matrix.target }}
+          path: ${{ matrix.asset }}*
+          retention-days: 1
+          if-no-files-found: error
+
   # ── 3. Create the GitHub Release and attach the binaries ───────────────────
+  #
+  # Runs whenever the TUI `build` job succeeded, even if `bundle-gui` failed: a
+  # flaky GUI leg then degrades to "TUI + whatever GUI bundles built" instead of
+  # blocking the whole release. The TUI archives are still required (a failed TUI
+  # leg fails `build` and skips this job).
   publish:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, bundle-gui]
+    # Only ever publish on a tag push — a manual dry run builds everything but
+    # skips this job. Runs whenever the TUI build succeeded, even if GUI bundling
+    # failed (a flaky GUI leg then degrades to a TUI-only release).
+    if: ${{ always() && needs.build.result == 'success' && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write   # required to create the Release
@@ -152,7 +277,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
-      # Download all four archives from the previous jobs
+      # Download every artifact that exists (TUI archives + any GUI bundles).
       - name: Download all artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -163,12 +288,14 @@ jobs:
       - name: List artifacts
         run: ls -lh artifacts/
 
-      # Generate SHA256SUMS with bare filenames so the in-app updater can
-      # verify a downloaded archive against its checksum.
+      # Generate SHA256SUMS with bare filenames so the in-app updater and
+      # install.sh can verify a downloaded archive (TUI) or installer (GUI).
+      # `nullglob` so a missing GUI set (bundle-gui failed) doesn't error the glob.
       - name: Generate checksums
         run: |
           cd artifacts
-          sha256sum omny-* > SHA256SUMS
+          shopt -s nullglob
+          sha256sum omny-* OmnySSH-* > SHA256SUMS
           cat SHA256SUMS
 
       # Extract the current release block from CHANGELOG.md: from the
@@ -185,7 +312,10 @@ jobs:
             echo 'CHANGELOG_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      # Create the Release and attach all binaries in one step
+      # Attach the TUI archives + checksums plus whichever GUI installers built.
+      # `fail_on_unmatched_files: false` so a GUI bundle whose leg failed is
+      # skipped rather than aborting the release; the TUI archives are guaranteed
+      # present here (this job only runs when the `build` job succeeded).
       - name: Create GitHub Release
         uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
         with:
@@ -193,11 +323,16 @@ jobs:
           body: ${{ steps.changelog.outputs.body }}
           draft: false
           prerelease: false
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: false
           files: |
             artifacts/omny-x86_64-unknown-linux-gnu.tar.gz
             artifacts/omny-aarch64-unknown-linux-musl.tar.gz
             artifacts/omny-x86_64-apple-darwin.tar.gz
             artifacts/omny-aarch64-apple-darwin.tar.gz
             artifacts/omny-x86_64-pc-windows-msvc.zip
+            artifacts/OmnySSH-aarch64-apple-darwin.dmg
+            artifacts/OmnySSH-x86_64-apple-darwin.dmg
+            artifacts/OmnySSH-x86_64.AppImage
+            artifacts/OmnySSH-x86_64.deb
+            artifacts/OmnySSH-x86_64-setup.exe
             artifacts/SHA256SUMS

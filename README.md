@@ -2,406 +2,171 @@
 
 # OmnySSH
 
-### TUI SSH dashboard & server manager — manage all your servers from a single terminal window
+### Every server you manage, in one window. Dashboard, terminal, SFTP, snippets.
 
-[![Crates.io](https://img.shields.io/crates/v/omnyssh.svg)](https://crates.io/crates/omnyssh)
+<img src="assets/gui.webp" alt="OmnySSH GUI dashboard" width="900">
+
+[![Downloads](https://img.shields.io/github/downloads/timhartmann7/omnyssh/total?label=total%20installs&color=2ea44f)](https://github.com/timhartmann7/omnyssh/releases)
+[![Latest release](https://img.shields.io/github/v/release/timhartmann7/omnyssh?label=latest)](https://github.com/timhartmann7/omnyssh/releases/latest)
+[![Stars](https://img.shields.io/github/stars/timhartmann7/omnyssh?style=flat)](https://github.com/timhartmann7/omnyssh/stargazers)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Downloads](https://img.shields.io/crates/d/omnyssh.svg)](https://crates.io/crates/omnyssh)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/timhartmann7/omnyssh/ci.yml?branch=main)](https://github.com/timhartmann7/omnyssh/actions)
+[![Build](https://img.shields.io/github/actions/workflow/status/timhartmann7/omnyssh/ci.yml?branch=main)](https://github.com/timhartmann7/omnyssh/actions)
 
-![Demo](assets/demo.gif)
-
+**[Install](#install)** •
 **[Features](#features)** •
-**[Installation](#installation)** •
-**[Quick Start](#quick-start)** •
-**[Documentation](#documentation)** •
-**[Contributing](#contributing)**
+**[SSH keys](#ssh-key-setup)** •
+**[Comparison](#comparison)** •
+**[TUI version](#the-tui-version)** •
+**[Telegram](#dev-notes)**
 
 </div>
 
 ---
 
-## Why OmnySSH?
+## Install
 
-Managing multiple SSH servers shouldn't require juggling terminal tabs, remembering IP addresses, or running the same commands over and over. OmnySSH brings **dashboard-style monitoring**, **visual file management**, and **command automation** into a single, lightweight TUI.
-
-**Stop switching between tools. Start managing smarter.**
-
-| Traditional Workflow | With OmnySSH |
-|---------------------|--------------|
-| Open 10 terminal tabs for 10 servers | Single dashboard with all servers visible |
-| `ssh user@192.168.1.10` → `top` → note CPU | Live CPU/RAM/Disk metrics on cards |
-| `scp -r local/ user@host:/remote/` | Drag-and-drop file manager (local ↔ remote) |
-| Paste the same deploy command everywhere | Save as snippet, broadcast to all hosts |
-| `tmux` for multi-session SSH | Built-in tabs + split-view terminal |
-
----
-
-## Features
-
-### 📊 **Live Metrics Dashboard**
-Server cards with real-time CPU, RAM, and disk usage. Color-coded thresholds (green → yellow → red) make it easy to spot issues at a glance.
-
-### 📁 **Visual File Manager**
-Split-panel SFTP browser (local ↔ remote) with progress bars, multi-selection, and intuitive keyboard shortcuts. No more memorizing `scp` syntax.
-
-### ⚡ **Command Snippets**
-Save frequently-used commands and execute them on any server with one keypress. Broadcast a command to multiple hosts simultaneously.
-
-### 🔐 **Auto SSH Key Setup**
-Press `Shift+K` on a password-based host to generate an Ed25519 key, install it in the server's `authorized_keys`, and switch the host to key authentication. After verifying the key works, it can disable password login on the server — with an automatic `sshd_config` backup and rollback if anything fails.
-
-### 🖥️ **Multi-Session Terminal**
-PTY tabs and split-view for working on several servers at once. Switch between hosts without leaving the app.
-
-### 🔍 **Fuzzy Search**
-Find any host or snippet instantly. Type a few letters, get instant results.
-
-### 🎨 **4 Built-in Themes**
-Choose from **Default**, **Dracula**, **Nord**, or **Gruvbox**. Switch with `--theme`, which saves your choice to `config.toml`.
-
-### ⌨️ **Configurable Keybindings**
-Remap global shortcuts in one TOML file. Make OmnySSH work the way you work.
-
-### 🌍 **Cross-Platform**
-Linux, macOS, Windows. Single self-contained binary — no runtime or interpreter to install.
-
----
-
-## Comparison
-
-| Feature | OmnySSH | plain SSH | Termius | tmux + ssh |
-|---------|---------|-----------|---------|------------|
-| **TUI interface** | ✅ | ❌ | ✅ (GUI) | ✅ |
-| **Live metrics dashboard** | ✅ | ❌ | ✅ | ❌ |
-| **Visual file manager (SFTP)** | ✅ | ❌ | ✅ | ❌ |
-| **Command snippets** | ✅ | ❌ | ✅ | ❌ |
-| **Multi-session tabs** | ✅ | ❌ | ✅ | ✅ |
-| **Fuzzy search** | ✅ | ❌ | ✅ | ❌ |
-| **Configurable themes** | ✅ | ❌ | ✅ | ⚠️ |
-| **Open source** | ✅ | ✅ | ❌ | ✅ |
-| **Free** | ✅ | ✅ | 💰 | ✅ |
-| **Runs in terminal** | ✅ | ✅ | ❌ | ✅ |
-| **Single binary** | ✅ | ✅ | ❌ | ❌ |
-
----
-
-## Installation
-
-### ⚡ Quick Install (Recommended)
-
-**One command to install on Linux/macOS:**
+One command on macOS and Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/timhartmann7/omnyssh/main/install.sh | sh
 ```
 
-This script auto-detects your OS and architecture, downloads the latest release, and installs it to your PATH.
+The script detects your OS and architecture and installs the latest desktop build — into `/Applications` on macOS, your app menu on Linux. Want the terminal app instead, or both? `curl … | sh -s -- --tui` (or `--both`). Prefer clicking? Grab the file for your platform from [**Releases**](https://github.com/timhartmann7/omnyssh/releases/latest).
+
+| Platform | File |
+|----------|------|
+| macOS Apple Silicon | `OmnySSH-aarch64-apple-darwin.dmg` |
+| macOS Intel | `OmnySSH-x86_64-apple-darwin.dmg` |
+| Linux x86_64 | `OmnySSH-x86_64.AppImage` / `.deb` |
+| Windows x86_64 | `OmnySSH-x86_64-setup.exe` |
+
+No account, no login screen, no telemetry. The app opens with an empty dashboard and reads your existing `~/.ssh/config` if you have one.
 
 ---
 
-### 🍺 Homebrew (macOS/Linux)
+## What it does
 
-```bash
-brew install timhartmann7/tap/omnyssh
-```
+You add a server once. After that it sits on the dashboard as a card with live CPU, RAM and disk, uptime, distro, the top processes eating your CPU, and a badge for what runs on it. One click on `sh` drops you into a real PTY terminal. One click on `files` opens a two panel SFTP browser. Ten servers fit on one screen and refresh on their own.
+
+### Live dashboard
+Cards for every host with CPU, RAM and disk bars, uptime, OS version, top processes, and a Docker badge showing how many containers are up. Bars turn yellow, then red, so a sick server is obvious from across the room.
+
+### Real terminals
+Full PTY sessions in tabs. Open several servers at once, split the view, keep them running while you work in the dashboard.
+
+### Two panel SFTP
+Local on the left, remote on the right. Drag files across, watch the progress bar, select many at once. Nobody remembers `scp -r` syntax anyway.
+
+### Snippets
+Save the commands you paste every week. Run one on a host with a keypress, or broadcast it to every server you have. Snippets take parameters, so `sudo systemctl restart {{service}}` asks you for the name.
+
+### Search everything
+Hit ⌘K and start typing. Hosts, snippets, screens. It gets you there in three keystrokes.
+
+### Streamer mode
+Swaps every real IP on screen for a fake one. Record a demo or share your screen without leaking client infrastructure.
+
+### Light and dark themes
+Both ship in the app. Switch from the sidebar.
+
+### Small
+Around 130 MB of RAM with several sessions open, on a 20 MB download. Termius on the same machine, doing nothing, sat at 649 MB across nine processes. Full numbers in the [comparison](#comparison).
 
 ---
 
-### 📦 Pre-built Binaries
+## SSH key setup
 
-Download from the [**Releases**](https://github.com/timhartmann7/omnyssh/releases) page:
+Password auth on a fresh VPS is the thing you always mean to fix and never do. OmnySSH does it in one click.
 
-| Platform | Archive |
-|----------|---------|
-| Linux x86_64 | `omny-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 (static, incl. Termux) | `omny-aarch64-unknown-linux-musl.tar.gz` |
-| macOS Intel | `omny-x86_64-apple-darwin.tar.gz` |
-| macOS Apple Silicon | `omny-aarch64-apple-darwin.tar.gz` |
-| Windows x86_64 | `omny-x86_64-pc-windows-msvc.zip` |
+Pick a password based host, hit **Set up SSH key**, and the app generates an Ed25519 key, appends the public half to `authorized_keys`, and switches the host over to key auth. It then opens a fresh connection with the new key to prove the key works. Only after that does it offer to turn off password login.
 
-Extract and move the binary to your PATH:
+Before touching `sshd_config` it saves a backup on the server. If any step fails, it restores the backup and leaves your access exactly as it was. Your private key never leaves your machine, and nothing gets sent anywhere except the server you chose.
 
-```bash
-tar -xzf omny-*.tar.gz
-sudo mv omny /usr/local/bin/
-```
+The code lives in [`crates/omnyssh-core/src/ssh/key_setup.rs`](crates/omnyssh-core/src/ssh/key_setup.rs). Read it before you point this at production. That is the whole point of shipping it open source.
 
 ---
 
-### 🦀 Cargo (from crates.io)
+## Comparison
+
+Memory and CPU measured on an M4 Mac with both apps open and idle.
+
+| | OmnySSH | Termius | tmux + ssh |
+|---|---|---|---|
+| RAM at idle | ~130 MB | ~649 MB | tiny |
+| Processes | 4 | 9 | 1 |
+| Live metrics dashboard | ✅ | ✅ | ❌ |
+| Two panel SFTP | ✅ | ✅ | ❌ |
+| Snippets and broadcast | ✅ | ✅ | ❌ |
+| One click key setup | ✅ | ❌ | ❌ |
+| Account required | ❌ | ✅ | ❌ |
+| Telemetry | ❌ | ✅ | ❌ |
+| Open source | ✅ | ❌ | ✅ |
+| Price | free | 💰 | free |
+
+tmux stays in the table because it is what most of us actually use. It wins on weight and loses on everything visual.
+
+---
+
+## The TUI version
+
+OmnySSH started in the terminal, and the TUI is still here, still maintained, still gets releases.
+
+![Demo](assets/demo.gif)
+
+Same engine underneath: the repo is a cargo workspace where `crates/omnyssh-core` holds the logic and the frontends sit on top. Dashboard, SFTP, snippets, multi session tabs, fuzzy search, plus four themes (`default`, `dracula`, `nord`, `gruvbox`) and remappable keys in `config.toml`.
+
+[![Crates.io](https://img.shields.io/crates/v/omnyssh.svg)](https://crates.io/crates/omnyssh)
+[![Crates downloads](https://img.shields.io/crates/d/omnyssh.svg)](https://crates.io/crates/omnyssh)
 
 ```bash
+# cargo
 cargo install omnyssh
-```
 
----
+# homebrew
+brew install timhartmann7/tap/omnyssh
 
-### 🔨 From Source
-
-```bash
-git clone https://github.com/timhartmann7/omnyssh.git
-cd omnyssh
-cargo build --release
-# Binary at: ./target/release/omny
-```
-
----
-
-### ❄️ Nix (Flakes)
-
-A `flake.nix` is provided for [Nix](https://nixos.org/) users who want a
-reproducible build, app entry point, and development shell. Enable flakes first
-if your Nix installation does not already do so
-(`experimental-features = nix-command flakes` in `~/.config/nix/nix.conf`).
-
-**Run without installing:**
-
-```bash
+# nix
 nix run github:timhartmann7/omnyssh
-nix run github:timhartmann7/omnyssh -- --theme dracula
 ```
 
-**Build a local checkout:**
+Then run `omny`. Press `a` to add a host, `/` to search, `?` for help, `Shift+K` to set up keys on the selected host.
 
-```bash
-git clone https://github.com/timhartmann7/omnyssh.git
-cd omnyssh
-nix build              # binary at ./result/bin/omny
-./result/bin/omny --version
-```
+Prebuilt TUI binaries for Linux, macOS, Windows and Termux live on the [Releases](https://github.com/timhartmann7/omnyssh/releases) page under the `omny-*` files. Config sits in `~/.config/omnyssh/` on Linux, `~/Library/Application Support/omnyssh/` on macOS, `%APPDATA%\omnyssh\` on Windows. Your `~/.ssh/config` is read at startup and never written to.
 
-**Install into your user profile:**
-
-```bash
-nix profile install github:timhartmann7/omnyssh
-```
-
-**Develop with a pinned toolchain:**
-
-```bash
-nix develop            # drops you into a shell with rustc, cargo, clippy,
-                       # rustfmt, rust-analyzer, and all build inputs ready
-cargo build
-```
-
-**Validate the flake:**
-
-```bash
-nix flake check        # builds, formats, lints, and tests the workspace
-```
-
-The flake exposes:
-
-- `packages.default` and `packages.omnyssh` for the `omny` binary plus man page
-- `apps.default` for `nix run`
-- `checks` for the package build, rustfmt, clippy, and workspace tests
-- `devShells.default` for day-to-day Rust development
-
-It evaluates cleanly across `x86_64-linux`, `aarch64-linux`, `x86_64-darwin`,
-and `aarch64-darwin`.
+Full options, keybindings and config examples: `man omny`.
 
 ---
 
-## Quick Start
+## Dev notes
 
-1. **Install OmnySSH** (see above)
+I write about what I am building on Telegram. Release notes, work in progress screenshots, benchmarks, and the things that broke on the way there. Usually before they show up anywhere else.
 
-2. **Run the app:**
-
-   ```bash
-   omny
-   ```
-
-3. **Add your first server:**
-   - Press `a` in the dashboard
-   - Enter hostname, user, and SSH key path
-   - Press `Enter` to connect
-
-4. **Try different themes:**
-
-   ```bash
-   omny --theme dracula
-   omny --theme nord
-   omny --theme gruvbox
-   ```
-
-5. **View full documentation:**
-
-   ```bash
-   man omny      # Man page with all options
-   omny --help   # Quick reference
-   ```
-
-6. **Explore features:**
-   - `1` — Dashboard (live metrics)
-   - `2` — File Manager (SFTP browser)
-   - `3` — Snippets (saved commands)
-   - `4` — Terminal (multi-session)
-   - `/` — Fuzzy search
-   - `Shift+K` — Set up SSH key auth on the selected host
-   - `?` — Help popup
-
----
-
-## Documentation
-
-### Man Page (Linux/macOS)
-
-```bash
-man omny
-```
-
-### Usage
-
-```
-omny [OPTIONS]
-
-Options:
-  -c, --config <FILE>   Path to a custom config file
-  -t, --theme <THEME>   Override the color theme (default | dracula | nord | gruvbox)
-  -v, --verbose         Enable debug logging (written to a log file)
-  -h, --help            Print help
-  -V, --version         Print version
-```
-
-### Configuration
-
-Config files live in the native OS config directory:
-
-| OS | Path |
-|----|------|
-| **Linux** | `~/.config/omnyssh/` (or `$XDG_CONFIG_HOME/omnyssh/`) |
-| **macOS** | `~/Library/Application Support/omnyssh/` |
-| **Windows** | `%APPDATA%\omnyssh\` |
-| **Termux (Android)** | `~/.config/omnyssh/` |
-
-> On macOS the path contains a space, so quote it in the shell:
-> `ls ~/Library/'Application Support'/omnyssh/`
-
-| File | Purpose |
-|------|---------|
-| `config.toml` | App settings, theme, keybindings |
-| `hosts.toml` | Managed host list |
-| `snippets.toml` | Saved commands |
-| `omnyssh.log.YYYY-MM-DD` | Daily rolling log file |
-
-The original `~/.ssh/config` is **never modified** — hosts are imported read-only at startup.
-
-#### Example: config.toml
-
-```toml
-[general]
-refresh_interval = 30          # seconds between metric refreshes
-default_shell = "/bin/bash"
-ssh_command = "ssh"            # path to system SSH binary
-max_concurrent_connections = 10
-
-[ui]
-theme = "default"              # default | dracula | nord | gruvbox
-
-[keybindings]
-quit         = "q"
-search       = "/"
-dashboard    = "F1"
-file_manager = "F2"
-snippets     = "F3"
-next_screen  = "Tab"           # cycle dashboard → files → snippets → terminal
-next_tab     = "Tab"           # next terminal tab (or pane focus when split)
-
-[update]
-check_on_startup = true        # check GitHub Releases for a newer version on startup
-skip_version = ""              # a version to skip; set when you choose "Skip this version"
-```
-
-#### Example: hosts.toml
-
-```toml
-[[hosts]]
-name = "web-prod-1"
-hostname = "192.168.1.10"
-user = "deploy"
-port = 22
-identity_file = "~/.ssh/id_ed25519"
-tags = ["production", "web"]
-notes = "Main web server. Nginx + Node.js"
-
-[[hosts]]
-name = "db-master"
-hostname = "10.0.0.50"
-user = "admin"
-port = 2222
-tags = ["production", "database"]
-notes = "PostgreSQL 16. Don't restart without warning #backend"
-```
-
-#### Example: snippets.toml
-
-```toml
-[[snippets]]
-name = "Docker: restart all"
-command = "cd /opt/app && docker compose down && docker compose up -d"
-scope = "global"
-tags = ["docker"]
-
-[[snippets]]
-name = "Restart service"
-command = "sudo systemctl restart {{service_name}}"
-scope = "global"
-params = ["service_name"]
-```
-
-### Themes
-
-| Theme | Description |
-|-------|-------------|
-| `default` | Neutral blue/cyan — works with any terminal palette |
-| `dracula` | Purple, pink, green — [Dracula](https://draculatheme.com/) |
-| `nord` | Arctic blues and teals — [Nord](https://www.nordtheme.com/) |
-| `gruvbox` | Warm amber and orange — [Gruvbox](https://github.com/morhetz/gruvbox) |
-
-Set the theme in `config.toml`, or pass `--theme` once — it is written back to `config.toml` and persists on the next run.
-
----
-
-## Development Roadmap
-
-| Version | Stage | Description |
-|---------|-------|-------------|
-| `0.0.1` | 0 | Project skeleton — TUI shell with placeholder screens |
-| `0.1.0` | 1 | Host list, SSH connect, fuzzy search — MVP |
-| `0.2.0` | 2 | Live metrics dashboard |
-| `0.3.0` | 3 | Snippets & quick-execute |
-| `0.4.0` | 4 | SFTP file manager |
-| `0.5.0` | 5 | Multi-session tabs & split-view |
-| `1.0.4` | 6 | Polish, themes, configurable keybindings |
-| `1.0.5` | 6 | Dead-code cleanup, docs.rs build fix |
-| **`1.1.0`** | **6** | **Cargo workspace — frontend-agnostic `omnyssh-core` crate — current** ✅ |
+### 👉 [**t.me/timhartmanndev**](https://t.me/timhartmanndev)
 
 ---
 
 ## Contributing
 
-Contributions are welcome! Please read [**CONTRIBUTING.md**](CONTRIBUTING.md) for development setup, code conventions, and the PR checklist.
+Pull requests welcome. [CONTRIBUTING.md](CONTRIBUTING.md) has the setup, the conventions and the checklist. Open an issue first if you plan something big, so we do not both build it.
 
-The repository is a cargo workspace: the frontend-agnostic engine lives in
-`crates/omnyssh-core`, and the TUI application (binary `omny`) lives in
-`crates/omnyssh`.
+Workspace layout:
 
----
+```
+crates/omnyssh-core   engine, frontend agnostic
+crates/omnyssh        TUI application (binary: omny)
+crates/omnyssh-gui    Tauri desktop application
+```
 
 ## License
 
-Apache 2.0 — see [**LICENSE**](LICENSE).
-
----
+Apache 2.0. See [LICENSE](LICENSE).
 
 <div align="center">
 
-### ⭐ Star this repo if you find it useful!
+### ⭐ Star the repo if OmnySSH saved you a terminal tab
 
-[Report Bug](https://github.com/timhartmann7/omnyssh/issues) •
-[Request Feature](https://github.com/timhartmann7/omnyssh/issues) •
+[Report a bug](https://github.com/timhartmann7/omnyssh/issues) •
+[Request a feature](https://github.com/timhartmann7/omnyssh/issues) •
 [Discussions](https://github.com/timhartmann7/omnyssh/discussions)
 
 </div>
