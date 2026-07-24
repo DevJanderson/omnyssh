@@ -250,9 +250,15 @@ jobs:
           if-no-files-found: error
 
   # ── 3. Create the GitHub Release and attach the binaries ───────────────────
+  #
+  # Runs whenever the TUI `build` job succeeded, even if `bundle-gui` failed: a
+  # flaky GUI leg then degrades to "TUI + whatever GUI bundles built" instead of
+  # blocking the whole release. The TUI archives are still required (a failed TUI
+  # leg fails `build` and skips this job).
   publish:
     name: Publish GitHub Release
     needs: [build, bundle-gui]
+    if: ${{ always() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write   # required to create the Release
@@ -260,7 +266,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
-      # Download all four archives from the previous jobs
+      # Download every artifact that exists (TUI archives + any GUI bundles).
       - name: Download all artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -273,9 +279,11 @@ jobs:
 
       # Generate SHA256SUMS with bare filenames so the in-app updater and
       # install.sh can verify a downloaded archive (TUI) or installer (GUI).
+      # `nullglob` so a missing GUI set (bundle-gui failed) doesn't error the glob.
       - name: Generate checksums
         run: |
           cd artifacts
+          shopt -s nullglob
           sha256sum omny-* omnyssh-gui-* > SHA256SUMS
           cat SHA256SUMS
 
@@ -293,7 +301,10 @@ jobs:
             echo 'CHANGELOG_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      # Create the Release and attach all binaries in one step
+      # Attach the TUI archives + checksums plus whichever GUI installers built.
+      # `fail_on_unmatched_files: false` so a GUI bundle whose leg failed is
+      # skipped rather than aborting the release; the TUI archives are guaranteed
+      # present here (this job only runs when the `build` job succeeded).
       - name: Create GitHub Release
         uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
         with:
@@ -301,7 +312,7 @@ jobs:
           body: ${{ steps.changelog.outputs.body }}
           draft: false
           prerelease: false
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: false
           files: |
             artifacts/omny-x86_64-unknown-linux-gnu.tar.gz
             artifacts/omny-aarch64-unknown-linux-musl.tar.gz
