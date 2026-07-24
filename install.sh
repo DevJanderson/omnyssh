@@ -360,15 +360,23 @@ install_gui_macos() {
     fi
     APP_NAME=$(basename "$APP")
     print_info "Installing $APP_NAME to /Applications..."
+    # Guard the copy explicitly: in `--both` mode set -e is suppressed (the call
+    # is left of `||`), so an unguarded failure would fall through to a false
+    # "installed" message. Always detach the image on the way out.
+    _copy_failed=0
     if [ -w /Applications ]; then
         rm -rf "/Applications/$APP_NAME"
-        cp -R "$APP" /Applications/
+        cp -R "$APP" /Applications/ || _copy_failed=1
     else
         print_warning "Installing into /Applications requires sudo privileges"
         sudo rm -rf "/Applications/$APP_NAME"
-        sudo cp -R "$APP" /Applications/
+        sudo cp -R "$APP" /Applications/ || _copy_failed=1
     fi
     hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
+    if [ "$_copy_failed" = "1" ]; then
+        print_error "Failed to copy $APP_NAME to /Applications"
+        return 1
+    fi
     # The app is unsigned; clearing quarantine lets it open without a Gatekeeper
     # prompt (a curl download carries none, so this is just belt-and-suspenders).
     xattr -dr com.apple.quarantine "/Applications/$APP_NAME" 2>/dev/null || true
@@ -381,7 +389,10 @@ install_gui_linux() {
     if command -v dpkg >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
         download_release_asset "omnyssh-gui-${TARGET}.deb" || return 1
         print_info "Installing the .deb package..."
-        sudo dpkg -i "$ASSET_PATH" || sudo apt-get install -f -y
+        sudo dpkg -i "$ASSET_PATH" || sudo apt-get install -f -y || {
+            print_error "Failed to install the .deb package"
+            return 1
+        }
         print_success "OmnySSH installed. Launch it from your application menu."
         return 0
     fi
@@ -392,9 +403,9 @@ install_gui_linux() {
     print_info "Installing the AppImage to $TARGET_BIN..."
     chmod +x "$APPIMAGE"
     if [ -w "$INSTALL_DIR" ]; then
-        mv "$APPIMAGE" "$TARGET_BIN"
+        mv "$APPIMAGE" "$TARGET_BIN" || { print_error "Failed to install AppImage to $TARGET_BIN"; return 1; }
     else
-        sudo mv "$APPIMAGE" "$TARGET_BIN"
+        sudo mv "$APPIMAGE" "$TARGET_BIN" || { print_error "Failed to install AppImage to $TARGET_BIN"; return 1; }
         sudo chmod +x "$TARGET_BIN"
     fi
     # Best-effort menu integration (no root needed).
