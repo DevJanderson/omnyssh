@@ -1,3 +1,7 @@
+// Release builds link as a Windows GUI binary, so launching the app never opens a
+// console window alongside it. Debug builds keep the console for cargo output.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! OmnySSH Desktop entry point. Wires the tauri-specta IPC boundary (commands +
 //! events), regenerates the TypeScript bindings in dev, spawns the core-event
 //! bridge, and boots the window (tech-gui.md §3.3–§3.4).
@@ -21,11 +25,17 @@ use commands::update::{check_update, install_update, load_update_config, save_up
 use omnyssh_core::event::{CoreEvent, SessionId};
 use omnyssh_core::ssh::pty::PtyManager;
 use state::GuiState;
+use tauri::webview::PageLoadEvent;
 use tauri::Manager;
 use tauri_specta::{collect_commands, collect_events, Builder};
 
 // Absolute at build time, so the export target is independent of the run CWD.
 const BINDINGS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/ui/src/lib/bindings.ts");
+
+/// How long the hidden window may wait for the page before it is revealed anyway.
+/// The app has no tray icon, so a frontend that never loads must not leave a
+/// running process the user cannot see or reach.
+const REVEAL_FALLBACK: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The single definition of the IPC surface. Shared by `main` (dev export +
 /// wiring) and the drift test so they can never disagree.
@@ -113,8 +123,36 @@ fn main() {
         // Opens the support dialog's GitHub/Telegram links in the default browser.
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(builder.invoke_handler())
+        // The window is created hidden (tauri.conf.json `visible: false`) so the
+        // launch never shows the webview's blank base colour; reveal it once the
+        // document — stylesheet included — is up.
+        .on_page_load(|webview, payload| {
+            if matches!(payload.event(), PageLoadEvent::Finished) {
+                let window = webview.window();
+                // Reveal once: a later page load must not raise the window over
+                // whatever the user is doing.
+                if !window.is_visible().unwrap_or(false) {
+                    let _ = window.show();
+                    // A window shown after build does not become key on its own everywhere.
+                    let _ = window.set_focus();
+                }
+            }
+        })
         .setup(move |app| {
             builder.mount_events(app);
+
+            let reveal = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(REVEAL_FALLBACK).await;
+                if let Some(window) = reveal.get_webview_window("main") {
+                    // Only when the page never got there: on macOS showing an
+                    // already-visible window raises it over whatever the user
+                    // switched to meanwhile.
+                    if !window.is_visible().unwrap_or(false) {
+                        let _ = window.show();
+                    }
+                }
+            });
 
             let (engine_tx, engine_rx) = tokio::sync::mpsc::channel::<CoreEvent>(256);
             // The additive PTY raw-byte tap (§3.6): the manager mirrors each session's

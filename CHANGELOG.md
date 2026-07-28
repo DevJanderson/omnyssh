@@ -7,6 +7,14 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## 1.1.1 — 2026-07-28
+
+### Bug Fixes
+- **Windows: the desktop app no longer opens a console window next to itself.** The GUI was linked as a console application, so Windows gave it a terminal and kept it on screen for the whole session. Release builds now link as a GUI binary. The same fix would have made one-click SSH key setup flash a console of its own while `ssh-keygen` runs, so that is suppressed too. macOS and Linux were never affected.
+- **No more white flash when the desktop app launches.** The window used to appear before the webview had painted anything, so the first frame was blank white before the dark (or light) interface took over. The window is now created hidden and revealed once the page is up, with a fallback that shows it anyway if the interface is slow to load.
+
+---
+
 ## 1.1.0 — 2026-07-24
 
 ### Features
