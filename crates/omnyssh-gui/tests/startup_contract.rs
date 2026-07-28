@@ -40,6 +40,20 @@ fn the_window_starts_hidden_on_the_dark_background() {
     );
 }
 
+/// The other half of `visible: false`: drop either reveal and the app becomes a
+/// running process with no window and no way to reach it.
+#[test]
+fn a_hidden_window_is_always_revealed() {
+    assert!(
+        MAIN_RS.contains(".on_page_load("),
+        "the page-load reveal is gone — the window would stay hidden until the fallback"
+    );
+    assert!(
+        MAIN_RS.contains("REVEAL_FALLBACK"),
+        "the fallback reveal is gone — a frontend that never loads would leave no window"
+    );
+}
+
 /// `--bg` of the dark theme — the single source of truth for the app's backdrop.
 fn dark_background_token() -> String {
     let css = read(Path::new(MANIFEST_DIR).join("ui/src/app.css"));
