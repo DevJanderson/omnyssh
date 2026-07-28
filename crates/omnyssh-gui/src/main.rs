@@ -25,11 +25,17 @@ use commands::update::{check_update, install_update, load_update_config, save_up
 use omnyssh_core::event::{CoreEvent, SessionId};
 use omnyssh_core::ssh::pty::PtyManager;
 use state::GuiState;
+use tauri::webview::PageLoadEvent;
 use tauri::Manager;
 use tauri_specta::{collect_commands, collect_events, Builder};
 
 // Absolute at build time, so the export target is independent of the run CWD.
 const BINDINGS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/ui/src/lib/bindings.ts");
+
+/// How long the hidden window may wait for the page before it is revealed anyway.
+/// The app has no tray icon, so a frontend that never loads must not leave a
+/// running process the user cannot see or reach.
+const REVEAL_FALLBACK: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The single definition of the IPC surface. Shared by `main` (dev export +
 /// wiring) and the drift test so they can never disagree.
@@ -117,8 +123,27 @@ fn main() {
         // Opens the support dialog's GitHub/Telegram links in the default browser.
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(builder.invoke_handler())
+        // The window is created hidden (tauri.conf.json `visible: false`) so the
+        // launch never shows the webview's blank base colour; reveal it once the
+        // document — stylesheet included — is up.
+        .on_page_load(|webview, payload| {
+            if matches!(payload.event(), PageLoadEvent::Finished) {
+                let window = webview.window();
+                let _ = window.show();
+                // A window shown after build does not become key on its own everywhere.
+                let _ = window.set_focus();
+            }
+        })
         .setup(move |app| {
             builder.mount_events(app);
+
+            let reveal = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(REVEAL_FALLBACK).await;
+                if let Some(window) = reveal.get_webview_window("main") {
+                    let _ = window.show();
+                }
+            });
 
             let (engine_tx, engine_rx) = tokio::sync::mpsc::channel::<CoreEvent>(256);
             // The additive PTY raw-byte tap (§3.6): the manager mirrors each session's

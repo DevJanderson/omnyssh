@@ -2,6 +2,9 @@
 //! settings that no runtime assertion can reach from a test binary (`cargo test`
 //! always builds with `debug_assertions`), so they are guarded at their source.
 
+use std::path::Path;
+
+const MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 const MAIN_RS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"));
 
 /// Without this attribute the binary links as a console app and Windows opens a
@@ -13,4 +16,47 @@ fn release_builds_link_as_a_windows_gui_binary() {
         "src/main.rs no longer declares windows_subsystem — release builds would \
          open a console window alongside the app on Windows"
     );
+}
+
+/// The window is revealed only once the page is up, so the launch never shows the
+/// webview's blank base colour. The background is what the fallback reveal paints
+/// when the frontend is slow, so it has to match the app's own dark surface.
+#[test]
+fn the_window_starts_hidden_on_the_dark_background() {
+    let config: serde_json::Value =
+        serde_json::from_str(&read(Path::new(MANIFEST_DIR).join("tauri.conf.json")))
+            .expect("tauri.conf.json is valid JSON");
+    let window = &config["app"]["windows"][0];
+
+    assert_eq!(
+        window["visible"],
+        serde_json::json!(false),
+        "the main window must be created hidden and revealed on page load"
+    );
+    assert_eq!(
+        window["backgroundColor"].as_str().map(str::to_lowercase),
+        Some(dark_background_token()),
+        "the native window background drifted from the dark --bg token"
+    );
+}
+
+/// `--bg` of the dark theme — the single source of truth for the app's backdrop.
+fn dark_background_token() -> String {
+    let css = read(Path::new(MANIFEST_DIR).join("ui/src/app.css"));
+    css.split_once(":root[data-theme='dark']")
+        .expect("app.css declares a dark theme block")
+        .1
+        .split_once("--bg:")
+        .expect("the dark theme block declares --bg")
+        .1
+        .split(';')
+        .next()
+        .expect("--bg is terminated")
+        .trim()
+        .to_lowercase()
+}
+
+fn read(path: impl AsRef<Path>) -> String {
+    let path = path.as_ref();
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
