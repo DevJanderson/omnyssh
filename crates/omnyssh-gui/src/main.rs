@@ -129,9 +129,13 @@ fn main() {
         .on_page_load(|webview, payload| {
             if matches!(payload.event(), PageLoadEvent::Finished) {
                 let window = webview.window();
-                let _ = window.show();
-                // A window shown after build does not become key on its own everywhere.
-                let _ = window.set_focus();
+                // Reveal once: a later page load must not raise the window over
+                // whatever the user is doing.
+                if !window.is_visible().unwrap_or(false) {
+                    let _ = window.show();
+                    // A window shown after build does not become key on its own everywhere.
+                    let _ = window.set_focus();
+                }
             }
         })
         .setup(move |app| {
@@ -141,7 +145,12 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(REVEAL_FALLBACK).await;
                 if let Some(window) = reveal.get_webview_window("main") {
-                    let _ = window.show();
+                    // Only when the page never got there: on macOS showing an
+                    // already-visible window raises it over whatever the user
+                    // switched to meanwhile.
+                    if !window.is_visible().unwrap_or(false) {
+                        let _ = window.show();
+                    }
                 }
             });
 

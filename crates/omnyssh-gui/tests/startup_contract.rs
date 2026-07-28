@@ -12,9 +12,9 @@ const MAIN_RS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/mai
 #[test]
 fn release_builds_link_as_a_windows_gui_binary() {
     assert!(
-        MAIN_RS.contains(r#"windows_subsystem = "windows""#),
-        "src/main.rs no longer declares windows_subsystem — release builds would \
-         open a console window alongside the app on Windows"
+        MAIN_RS.contains(r#"#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]"#),
+        "src/main.rs no longer declares the windows_subsystem attribute — release \
+         builds would open a console window alongside the app on Windows"
     );
 }
 
@@ -43,9 +43,11 @@ fn the_window_starts_hidden_on_the_dark_background() {
 /// `--bg` of the dark theme — the single source of truth for the app's backdrop.
 fn dark_background_token() -> String {
     let css = read(Path::new(MANIFEST_DIR).join("ui/src/app.css"));
-    css.split_once(":root[data-theme='dark']")
+    let block = css
+        .split_once(":root[data-theme='dark']")
         .expect("app.css declares a dark theme block")
-        .1
+        .1;
+    block[..block.find('}').expect("the dark theme block is closed")]
         .split_once("--bg:")
         .expect("the dark theme block declares --bg")
         .1
