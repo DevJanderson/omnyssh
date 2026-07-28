@@ -1,3 +1,7 @@
+// Release builds link as a Windows GUI binary, so launching the app never opens a
+// console window alongside it. Debug builds keep the console for cargo output.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! OmnySSH Desktop entry point. Wires the tauri-specta IPC boundary (commands +
 //! events), regenerates the TypeScript bindings in dev, spawns the core-event
 //! bridge, and boots the window (tech-gui.md §3.3–§3.4).
