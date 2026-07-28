@@ -288,6 +288,11 @@ pub async fn generate_key_pair(host_name: &str, key_type: KeyType) -> Result<(Pa
         .arg("-C")
         .arg(format!("omnyssh-{}", host_name)); // Comment
 
+    // CREATE_NO_WINDOW: the GUI has no console to lend the child, so without this
+    // Windows opens one for it. Output is piped either way, so nothing is lost.
+    #[cfg(windows)]
+    keygen_cmd.creation_flags(0x0800_0000);
+
     let keygen_output = keygen_cmd
         .output()
         .await
