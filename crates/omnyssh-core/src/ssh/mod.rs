@@ -5,6 +5,7 @@
 /// discovery and Auto SSH Key Setup for secure authentication.
 pub mod client;
 pub mod discovery;
+pub mod jump;
 pub mod key_setup;
 pub mod metrics;
 pub mod pool;

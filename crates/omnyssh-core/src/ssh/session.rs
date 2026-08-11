@@ -4,8 +4,12 @@
 //! supports connecting, executing commands, and graceful disconnect.
 //! Authentication order: identity file → SSH agent → failure.
 //!
+//! Hosts with a `ProxyJump` are reached through their bastions: each hop is
+//! connected and authenticated in turn, and the next hop rides a
+//! `direct-tcpip` channel opened on the previous one (the `ssh -J` model).
+//!
 //! Connection and command timeouts are enforced:
-//! - Connect timeout: 10 seconds
+//! - Connect timeout: 10 seconds (per hop)
 //! - Command timeout: 30 seconds
 
 use std::sync::Arc;
@@ -99,6 +103,31 @@ impl client::Handler for KnownHostsHandler {
 }
 
 // ---------------------------------------------------------------------------
+// SshConnection
+// ---------------------------------------------------------------------------
+
+/// An authenticated russh connection to one host, plus the jump-host
+/// connections it is tunnelled through (empty for a direct connection).
+///
+/// The jump handles are held for the whole lifetime of the connection: each one
+/// carries the `direct-tcpip` channel of the hop above it, so dropping a bastion
+/// handle would tear down everything beyond it. Derefs to the target's
+/// [`Handle`], so callers open channels on it exactly as before.
+pub(crate) struct SshConnection {
+    handle: Handle<KnownHostsHandler>,
+    /// Bastions, nearest-first. Never used directly — kept alive by ownership.
+    _jumps: Vec<Handle<KnownHostsHandler>>,
+}
+
+impl std::ops::Deref for SshConnection {
+    type Target = Handle<KnownHostsHandler>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.handle
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SshSession
 // ---------------------------------------------------------------------------
 
@@ -110,7 +139,7 @@ impl client::Handler for KnownHostsHandler {
 /// Wrapped in Arc to allow sharing across multiple operations (discovery + metrics).
 #[derive(Clone)]
 pub struct SshSession {
-    handle: Arc<Handle<KnownHostsHandler>>,
+    handle: Arc<SshConnection>,
 }
 
 impl SshSession {
@@ -122,12 +151,16 @@ impl SshSession {
     /// 3. Default key files (`~/.ssh/id_ed25519`, `id_rsa`, etc.).
     /// 4. Password (if provided in host config).
     ///
+    /// A host with a `ProxyJump` is reached through its bastion chain; each hop
+    /// authenticates the same way.
+    ///
     /// Returns an error when no method succeeds or the connection times out.
     ///
     /// # Errors
-    /// - Connection timeout (> 10 s)
+    /// - Connection timeout (> 10 s per hop)
     /// - Authentication failure
     /// - Network error
+    /// - An unresolvable `ProxyJump` chain (cycle or too many hops)
     pub async fn connect(host: &Host) -> anyhow::Result<Self> {
         Ok(Self {
             handle: Arc::new(connect_and_auth(host).await?),
@@ -215,38 +248,139 @@ impl SshSession {
 // Connection + authentication
 // ---------------------------------------------------------------------------
 
-/// Connect to `host`, verify its host key, and authenticate.
+/// Per-hop budget for the TCP connect and SSH handshake.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Connect to `host`, verify its host key, and authenticate — through the
+/// host's `ProxyJump` chain when it has one.
 ///
 /// Shared by [`SshSession::connect`] (metrics/SFTP) and the terminal so every
-/// native SSH path honors the same keys, agent, passwords, and known_hosts
-/// policy.
+/// native SSH path honors the same keys, agent, passwords, known_hosts policy,
+/// and bastions.
 ///
 /// # Errors
-/// Connection timeout (> 10 s), host-key rejection, or authentication failure.
-pub(crate) async fn connect_and_auth(host: &Host) -> anyhow::Result<Handle<KnownHostsHandler>> {
-    let config = Arc::new(client::Config {
+/// Connection timeout (> 10 s per hop), host-key rejection, authentication
+/// failure, or an unresolvable `ProxyJump` chain.
+pub(crate) async fn connect_and_auth(host: &Host) -> anyhow::Result<SshConnection> {
+    let chain = jump_chain(host).await?;
+    let config = client_config();
+
+    // Walk the bastions outward: the first is reached directly, every later one
+    // through its predecessor. The target then rides the last hop.
+    let mut jumps: Vec<Handle<KnownHostsHandler>> = Vec::with_capacity(chain.len());
+    for hop in &chain {
+        let handle = match jumps.last() {
+            None => connect_direct(&config, hop).await,
+            Some(via) => connect_tunnelled(&config, via, hop).await,
+        }
+        .with_context(|| format!("ProxyJump via '{}' failed", hop.name))?;
+        jumps.push(handle);
+    }
+
+    let handle = match jumps.last() {
+        None => connect_direct(&config, host).await?,
+        Some(via) => connect_tunnelled(&config, via, host).await?,
+    };
+    Ok(SshConnection {
+        handle,
+        _jumps: jumps,
+    })
+}
+
+/// The shared russh client configuration (timeouts + keepalives).
+fn client_config() -> Arc<client::Config> {
+    Arc::new(client::Config {
         inactivity_timeout: Some(Duration::from_secs(30)),
         keepalive_interval: Some(Duration::from_secs(15)),
         keepalive_max: 3,
         ..Default::default()
-    });
+    })
+}
 
+/// Resolves `host`'s `ProxyJump` into the hops to connect before it.
+///
+/// The jump aliases are looked up in the merged host list, so a bastion defined
+/// elsewhere in `~/.ssh/config` (or in `hosts.toml`) contributes its own
+/// HostName/User/Port/IdentityFile. Loading is skipped entirely for the common
+/// no-`ProxyJump` case, and an unreadable host list degrades to treating the
+/// alias as a literal hostname rather than failing the connection.
+async fn jump_chain(host: &Host) -> anyhow::Result<Vec<Host>> {
+    if host.proxy_jump.is_none() {
+        return Ok(Vec::new());
+    }
+    // load_all_hosts() is blocking file I/O — keep it off the async worker.
+    let known = tokio::task::spawn_blocking(crate::config::load_all_hosts)
+        .await
+        .context("host list load panicked")?
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "could not load hosts for ProxyJump resolution");
+            Vec::new()
+        });
+    crate::ssh::jump::resolve_chain(host, &known)
+}
+
+/// Opens a TCP connection to `host` and authenticates.
+async fn connect_direct(
+    config: &Arc<client::Config>,
+    host: &Host,
+) -> anyhow::Result<Handle<KnownHostsHandler>> {
     let addr = format!("{}:{}", host.hostname, host.port);
-    let mut handle = time::timeout(
-        Duration::from_secs(10),
-        client::connect(
-            config,
-            addr,
-            KnownHostsHandler {
-                host: host.hostname.clone(),
-                port: host.port,
-            },
+    let handle = time::timeout(
+        CONNECT_TIMEOUT,
+        client::connect(Arc::clone(config), addr, known_hosts_handler(host)),
+    )
+    .await
+    .map_err(|_| anyhow!("SSH connection timed out (10 s)"))?
+    .context("SSH connection failed")?;
+
+    finish_auth(handle, host).await
+}
+
+/// Reaches `host` through the already-connected bastion `via`: a `direct-tcpip`
+/// channel on the bastion carries a second SSH session to the target, which is
+/// verified and authenticated in its own right.
+async fn connect_tunnelled(
+    config: &Arc<client::Config>,
+    via: &Handle<KnownHostsHandler>,
+    host: &Host,
+) -> anyhow::Result<Handle<KnownHostsHandler>> {
+    // The originator address is informational; ssh(1) reports the loopback it
+    // forwards from, and servers only log it.
+    let channel = via
+        .channel_open_direct_tcpip(host.hostname.clone(), host.port as u32, "127.0.0.1", 0)
+        .await
+        .with_context(|| format!("open tunnel to {}:{}", host.hostname, host.port))?;
+
+    let handle = time::timeout(
+        CONNECT_TIMEOUT,
+        client::connect_stream(
+            Arc::clone(config),
+            channel.into_stream(),
+            known_hosts_handler(host),
         ),
     )
     .await
     .map_err(|_| anyhow!("SSH connection timed out (10 s)"))?
     .context("SSH connection failed")?;
 
+    finish_auth(handle, host).await
+}
+
+/// The host-key verifier for `host`. The lookup uses the target's own
+/// hostname/port even over a tunnel, so `known_hosts` entries match what an
+/// `ssh -J` would record.
+fn known_hosts_handler(host: &Host) -> KnownHostsHandler {
+    KnownHostsHandler {
+        host: host.hostname.clone(),
+        port: host.port,
+    }
+}
+
+/// Authenticates `handle` as `host`, converting a refusal into an error.
+async fn finish_auth(
+    mut handle: Handle<KnownHostsHandler>,
+    host: &Host,
+) -> anyhow::Result<Handle<KnownHostsHandler>> {
     if !authenticate(&mut handle, host).await? {
         return Err(anyhow!("SSH authentication failed for {}", host.name));
     }
