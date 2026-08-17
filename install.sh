@@ -386,8 +386,21 @@ install_gui_macos() {
 }
 
 install_gui_linux() {
-    # Prefer the .deb on Debian/Ubuntu — it integrates into the app menu and needs
-    # no FUSE. Fall back to the portable AppImage everywhere else.
+    # Prefer a native package where one exists — it integrates into the app menu,
+    # needs no FUSE, and links the distro's own WebKit instead of the runtime the
+    # AppImage ships (which black-screens on some Wayland setups). Fall back to
+    # the portable AppImage everywhere else.
+    if command -v rpm >/dev/null 2>&1 && command -v dnf >/dev/null 2>&1; then
+        download_release_asset "OmnySSH-${ARCH}.rpm" || return 1
+        print_info "Installing the .rpm package..."
+        sudo dnf install -y "$ASSET_PATH" || {
+            print_error "Failed to install the .rpm package"
+            return 1
+        }
+        print_success "OmnySSH installed. Launch it from your application menu."
+        return 0
+    fi
+
     if command -v dpkg >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
         download_release_asset "OmnySSH-${ARCH}.deb" || return 1
         print_info "Installing the .deb package..."

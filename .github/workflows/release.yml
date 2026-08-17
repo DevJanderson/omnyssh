@@ -154,7 +154,7 @@ jobs:
   #
   #   macos-latest   → aarch64-apple-darwin   (native)        → .dmg
   #   macos-latest   → x86_64-apple-darwin    (cross)         → .dmg
-  #   ubuntu-22.04   → x86_64-unknown-linux-gnu                → .deb + .AppImage
+  #   ubuntu-22.04   → x86_64-unknown-linux-gnu                → .deb + .AppImage + .rpm
   #   windows-latest → x86_64-pc-windows-msvc                  → NSIS -setup.exe
   bundle-gui:
     name: Bundle GUI · ${{ matrix.target }}
@@ -174,7 +174,7 @@ jobs:
             asset:   OmnySSH-x86_64-apple-darwin
           - target:  x86_64-unknown-linux-gnu
             runner:  ubuntu-22.04
-            bundles: deb,appimage
+            bundles: deb,appimage,rpm
             asset:   OmnySSH-x86_64
           - target:  x86_64-pc-windows-msvc
             runner:  windows-latest
@@ -239,6 +239,7 @@ jobs:
           for f in "$out"/dmg/*.dmg;           do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.dmg"; done
           for f in "$out"/appimage/*.AppImage; do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.AppImage"; done
           for f in "$out"/deb/*.deb;           do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.deb"; done
+          for f in "$out"/rpm/*.rpm;           do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.rpm"; done
           ls -lh "${{ matrix.asset }}".*
 
       - name: Collect bundles (Windows)
@@ -334,5 +335,6 @@ jobs:
             artifacts/OmnySSH-x86_64-apple-darwin.dmg
             artifacts/OmnySSH-x86_64.AppImage
             artifacts/OmnySSH-x86_64.deb
+            artifacts/OmnySSH-x86_64.rpm
             artifacts/OmnySSH-x86_64-setup.exe
             artifacts/SHA256SUMS

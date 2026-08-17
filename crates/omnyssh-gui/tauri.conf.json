@@ -30,7 +30,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "appimage", "deb", "nsis"],
+    "targets": ["dmg", "appimage", "deb", "nsis", "rpm"],
     "category": "Utility",
     "shortDescription": "Native GUI for the OmnySSH engine",
     "longDescription": "OmnySSH Desktop — SSH dashboard, terminal, and SFTP file manager.",
