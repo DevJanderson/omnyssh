@@ -54,6 +54,19 @@ fn a_hidden_window_is_always_revealed() {
     );
 }
 
+/// The reveal doubles as the signal that the page rendered, and the AppImage render
+/// retry reads it. Drop this one store and every AppImage launch looks like a failed
+/// one, so the app would restart itself into software rendering every single time —
+/// with every other test still green.
+#[test]
+fn a_loaded_page_is_recorded_for_the_render_retry() {
+    assert!(
+        MAIN_RS.contains("PAGE_LOADED.store("),
+        "the page-load flag is no longer set — the AppImage would restart itself on \
+         every launch"
+    );
+}
+
 /// The rpm bundler writes `Requires:` from this list and nothing else — it never scans
 /// the binary — so an empty list ships a package that installs onto a system with no
 /// webview and then dies at launch. Sonames, not package names: the package providing

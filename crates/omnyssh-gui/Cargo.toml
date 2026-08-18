@@ -44,6 +44,11 @@ tauri-plugin-opener = "2"
 # runtime; also asserts the wire form of DTOs in tests (e.g. HostDto never carries a password).
 serde_json = "1"
 
+# Only to restore SIGPIPE after a failed `exec` in the AppImage render retry — `std`
+# resets it as part of the child setup it runs in this process and never puts it back.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # Property-based coverage of snippet param substitution (tech-gui.md §6.4, §7 Stage 2.2).
 proptest = "1"

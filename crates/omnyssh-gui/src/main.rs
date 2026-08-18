@@ -47,6 +47,11 @@ static PAGE_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 #[cfg(target_os = "linux")]
 const RENDER_HEAL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(12);
 
+// The heal must outlast the reveal, or it would judge a page that is merely still
+// loading. Prose in the doc comment above cannot fail a build; this can.
+#[cfg(target_os = "linux")]
+const _: () = assert!(RENDER_HEAL_DEADLINE.as_secs() > REVEAL_FALLBACK.as_secs());
+
 /// Marks the child of a software-rendering retry so it can only ever happen once.
 /// Exporting it by hand disables the retry — the intended escape hatch.
 #[cfg(target_os = "linux")]
@@ -166,7 +171,14 @@ fn exec_software_render_retry() -> std::io::Error {
     // clearing the environment would throw away the AppDir's library paths.
     cmd.env("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
         .env(RETRY_MARKER, "1");
-    cmd.exec()
+
+    let failure = cmd.exec();
+    // `exec` sets up the child in *this* process before `execvp`, which includes resetting
+    // SIGPIPE to SIG_DFL, and it does not undo that when `execvp` fails. Left alone, the
+    // first SSH socket to close under a write would kill the app instead of erroring.
+    // SAFETY: restoring the disposition the Rust runtime installs at startup.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+    failure
 }
 
 fn main() {
@@ -222,14 +234,21 @@ fn main() {
             #[cfg(target_os = "linux")]
             tauri::async_runtime::spawn(async {
                 tokio::time::sleep(RENDER_HEAL_DEADLINE).await;
-                let appdir = std::env::var_os("APPDIR").map(std::path::PathBuf::from);
+                // `current_exe` is already the kernel's resolved path, so resolve the
+                // AppDir too — a symlinked $TMPDIR would otherwise make the two
+                // uncomparable and silently disable the retry.
+                let appdir = std::env::var_os("APPDIR")
+                    .map(std::path::PathBuf::from)
+                    .map(|dir| std::fs::canonicalize(&dir).unwrap_or(dir));
                 let exe = std::env::current_exe().ok();
                 if should_retry_software_rendering(
                     PAGE_LOADED.load(std::sync::atomic::Ordering::Acquire),
                     appdir.as_deref(),
                     exe.as_deref(),
                     std::env::var_os(RETRY_MARKER).is_some(),
-                    std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some(),
+                    // WebKit's own test: set, and not "0".
+                    std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER")
+                        .is_some_and(|value| value != "0"),
                 ) {
                     eprintln!(
                         "OmnySSH: the interface never loaded — restarting once with software rendering"
