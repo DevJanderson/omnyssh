@@ -245,6 +245,8 @@ jobs:
       - name: Collect bundles (Unix)
         if: runner.os != 'Windows'
         shell: bash   # `-o pipefail`, so a failed `grep` below cannot pass as an empty version
+        env:
+          BUNDLES: ${{ matrix.bundles }}
         run: |
           out="target/${{ matrix.target }}/release/bundle"
           version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
@@ -252,17 +254,24 @@ jobs:
           [ -n "$version" ] || { echo "no version in Cargo.toml"; exit 1; }
           collect() {
             local files=("$out/$1"/*"$2")
-            [ -e "${files[0]}" ] || return 0   # this leg does not build the format
+            [ -e "${files[0]}" ] || { echo "no $2 bundle"; exit 1; }
             [ "${#files[@]}" -eq 1 ] || { echo "several $2 bundles: ${files[*]}"; exit 1; }
             case "${files[0]}" in
               *"$version"*) cp "${files[0]}" "$3" ;;
               *) echo "${files[0]} is not $version"; exit 1 ;;
             esac
           }
-          collect dmg      .dmg      "${{ matrix.asset }}.dmg"
-          collect appimage .AppImage "${{ matrix.asset }}.AppImage"
-          collect deb      .deb      "${{ matrix.asset }}.deb"
-          collect rpm      .rpm      "${{ matrix.asset }}.rpm"
+          # Driven by the formats this leg asked `tauri build` for, so a bundler that
+          # stops emitting one fails the dry run instead of only the tag.
+          for format in ${BUNDLES//,/ }; do
+            case "$format" in
+              dmg)      collect dmg      .dmg      "${{ matrix.asset }}.dmg" ;;
+              appimage) collect appimage .AppImage "${{ matrix.asset }}.AppImage" ;;
+              deb)      collect deb      .deb      "${{ matrix.asset }}.deb" ;;
+              rpm)      collect rpm      .rpm      "${{ matrix.asset }}.rpm" ;;
+              *) echo "unknown bundle format: $format"; exit 1 ;;
+            esac
+          done
           ls -lh "${{ matrix.asset }}".*
 
       - name: Collect bundles (Windows)
