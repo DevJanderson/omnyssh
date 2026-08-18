@@ -34,7 +34,7 @@ jobs:
           key: ci-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - run: cargo test --verbose
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo fmt --check
 
   # ── 2. Build release binaries ──────────────────────────────────────────────

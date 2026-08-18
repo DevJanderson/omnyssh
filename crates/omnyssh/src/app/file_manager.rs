@@ -764,8 +764,10 @@ mod tests {
         // Regression: the listing must place the cursor on the focus target
         // *after* the hidden-files filter runs. With show_hidden = false the
         // dotfile is filtered out, but the visible target must still be found.
-        let mut p = FilePanelView::default();
-        p.pending_focus_path = Some("/home/projects".to_string());
+        let mut p = FilePanelView {
+            pending_focus_path: Some("/home/projects".to_string()),
+            ..Default::default()
+        };
         p.apply_listing(vec![
             entry("..", "/home"),
             entry(".cache", "/home/.cache"),
@@ -787,8 +789,10 @@ mod tests {
     /// Convenience: build a panel with both raw and visible entries the
     /// same way the real listing handlers do.
     fn panel_with_raw(raw: Vec<FileEntry>) -> FilePanelView {
-        let mut p = FilePanelView::default();
-        p.raw_entries = raw;
+        let mut p = FilePanelView {
+            raw_entries: raw,
+            ..Default::default()
+        };
         // The real listing handlers assign `raw_entries` then call
         // `apply_hidden_filter()` to derive the visible list. Tests should
         // see the same post-filter state, so we run the filter here too.
