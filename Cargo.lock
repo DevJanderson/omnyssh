@@ -3219,6 +3219,7 @@ name = "omnyssh-gui"
 version = "1.1.1"
 dependencies = [
  "chrono",
+ "libc",
  "omnyssh-core",
  "proptest",
  "serde",

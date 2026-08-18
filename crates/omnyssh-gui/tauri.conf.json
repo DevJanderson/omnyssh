@@ -30,7 +30,16 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "appimage", "deb", "nsis"],
+    "targets": ["dmg", "appimage", "deb", "nsis", "rpm"],
+    "linux": {
+      "rpm": {
+        "depends": [
+          "libwebkit2gtk-4.1.so.0()(64bit)",
+          "libjavascriptcoregtk-4.1.so.0()(64bit)",
+          "libgtk-3.so.0()(64bit)"
+        ]
+      }
+    },
     "category": "Utility",
     "shortDescription": "Native GUI for the OmnySSH engine",
     "longDescription": "OmnySSH Desktop — SSH dashboard, terminal, and SFTP file manager.",

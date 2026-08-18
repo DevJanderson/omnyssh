@@ -37,7 +37,7 @@ The script detects your OS and architecture and installs the latest desktop buil
 |----------|------|
 | macOS Apple Silicon | `OmnySSH-aarch64-apple-darwin.dmg` |
 | macOS Intel | `OmnySSH-x86_64-apple-darwin.dmg` |
-| Linux x86_64 | `OmnySSH-x86_64.AppImage` / `.deb` |
+| Linux x86_64 | `OmnySSH-x86_64.AppImage` / `.deb` / `.rpm` |
 | Windows x86_64 | `OmnySSH-x86_64-setup.exe` |
 
 No account, no login screen, no telemetry. The app opens with an empty dashboard and reads your existing `~/.ssh/config` if you have one — hosts behind a bastion (`ProxyJump`) included.

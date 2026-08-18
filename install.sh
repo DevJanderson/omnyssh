@@ -386,9 +386,35 @@ install_gui_macos() {
 }
 
 install_gui_linux() {
-    # Prefer the .deb on Debian/Ubuntu — it integrates into the app menu and needs
-    # no FUSE. Fall back to the portable AppImage everywhere else.
-    if command -v dpkg >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+    # Prefer a native package where one exists — it integrates into the app menu,
+    # needs no FUSE, and links the distro's own WebKit instead of the runtime the
+    # AppImage ships (which black-screens on some Wayland setups). Fall back to
+    # the portable AppImage everywhere else.
+    _rpm_host=0
+    if command -v rpm >/dev/null 2>&1 && command -v dnf >/dev/null 2>&1; then
+        _rpm_host=1
+        if download_release_asset "OmnySSH-${ARCH}.rpm"; then
+            print_info "Installing the .rpm package..."
+            if sudo dnf install -y "$ASSET_PATH"; then
+                # The package brings its own binary and menu entry under different names
+                # than the AppImage this script installs, so an earlier AppImage would
+                # survive as a second launcher — the very build the user is escaping.
+                sudo rm -f "$INSTALL_DIR/omnyssh" || true
+                rm -f "$HOME/.local/share/applications/omnyssh.desktop" || true
+                print_success "OmnySSH installed. Launch it from your application menu."
+                return 0
+            fi
+        fi
+        # A release that predates the .rpm, or a dnf host that has no WebKitGTK 4.1 to
+        # satisfy it (RHEL 9 and its rebuilds), must not end the install here. The
+        # AppImage is portable, but it needs FUSE and a new enough glibc — hence the
+        # hedge rather than a promise.
+        print_warning "The .rpm could not be installed — trying the AppImage instead"
+    fi
+
+    # Never on an RPM host, even one that happens to have dpkg: unpacking a .deb onto
+    # an RPM-managed filesystem is worse than the portable AppImage.
+    if [ "$_rpm_host" = 0 ] && command -v dpkg >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
         download_release_asset "OmnySSH-${ARCH}.deb" || return 1
         print_info "Installing the .deb package..."
         sudo dpkg -i "$ASSET_PATH" || sudo apt-get install -f -y || {

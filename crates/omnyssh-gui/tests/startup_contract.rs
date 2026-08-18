@@ -54,6 +54,44 @@ fn a_hidden_window_is_always_revealed() {
     );
 }
 
+/// The reveal doubles as the signal that the page rendered, and the AppImage render
+/// retry reads it. Drop this one store and every AppImage launch looks like a failed
+/// one, so the app would restart itself into software rendering every single time —
+/// with every other test still green.
+#[test]
+fn a_loaded_page_is_recorded_for_the_render_retry() {
+    assert!(
+        MAIN_RS.contains("PAGE_LOADED.store("),
+        "the page-load flag is no longer set — the AppImage would restart itself on \
+         every launch"
+    );
+}
+
+/// The rpm bundler writes `Requires:` from this list and nothing else — it never scans
+/// the binary — so an empty list ships a package that installs onto a system with no
+/// webview and then dies at launch. Sonames, not package names: the package providing
+/// them is called something different on every RPM distro.
+#[test]
+fn the_rpm_declares_the_libraries_it_links() {
+    let config: serde_json::Value =
+        serde_json::from_str(&read(Path::new(MANIFEST_DIR).join("tauri.conf.json")))
+            .expect("tauri.conf.json is valid JSON");
+    let depends = config["bundle"]["linux"]["rpm"]["depends"]
+        .as_array()
+        .expect("the rpm bundle declares its runtime dependencies");
+
+    for lib in [
+        "libwebkit2gtk-4.1.so.0()(64bit)",
+        "libjavascriptcoregtk-4.1.so.0()(64bit)",
+        "libgtk-3.so.0()(64bit)",
+    ] {
+        assert!(
+            depends.iter().any(|d| d == lib),
+            "the rpm no longer requires {lib} — dnf would install a build that cannot start"
+        );
+    }
+}
+
 /// `--bg` of the dark theme — the single source of truth for the app's backdrop.
 fn dark_background_token() -> String {
     let css = read(Path::new(MANIFEST_DIR).join("ui/src/app.css"));

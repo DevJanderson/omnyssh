@@ -37,6 +37,26 @@ const BINDINGS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/ui/src/lib/bin
 /// running process the user cannot see or reach.
 const REVEAL_FALLBACK: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Set once the document is up. `is_visible()` stops answering that question the moment
+/// the fallback reveals the window, so the render check reads this instead.
+static PAGE_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A page still missing this long into an AppImage launch is a broken graphics stack,
+/// not a slow disk. Deliberately far past `REVEAL_FALLBACK`: that one only reveals a
+/// window, this one restarts the process.
+#[cfg(target_os = "linux")]
+const RENDER_HEAL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(12);
+
+// The heal must outlast the reveal, or it would judge a page that is merely still
+// loading. Prose in the doc comment above cannot fail a build; this can.
+#[cfg(target_os = "linux")]
+const _: () = assert!(RENDER_HEAL_DEADLINE.as_secs() > REVEAL_FALLBACK.as_secs());
+
+/// Marks the child of a software-rendering retry so it can only ever happen once.
+/// Exporting it by hand disables the retry — the intended escape hatch.
+#[cfg(target_os = "linux")]
+const RETRY_MARKER: &str = "OMNYSSH_SOFTWARE_RENDER_RETRY";
+
 /// The single definition of the IPC surface. Shared by `main` (dev export +
 /// wiring) and the drift test so they can never disagree.
 fn specta_builder() -> Builder<tauri::Wry> {
@@ -108,6 +128,59 @@ fn export_bindings(path: impl AsRef<std::path::Path>) {
         .expect("failed to export TypeScript bindings");
 }
 
+/// Whether a blank launch should be retried once with WebKit's software renderer.
+/// `$APPDIR` alone would not do — an AppImage exports it to everything it starts, so a
+/// deb install launched from an AppImage terminal would match. Requiring the running
+/// binary to live inside the AppDir pins the retry to our own bundle.
+// Compiled everywhere, called only on Linux, so the decision stays unit-testable.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn should_retry_software_rendering(
+    page_loaded: bool,
+    appdir: Option<&std::path::Path>,
+    current_exe: Option<&std::path::Path>,
+    already_retried: bool,
+    dmabuf_disabled: bool,
+) -> bool {
+    if page_loaded || already_retried || dmabuf_disabled {
+        return false;
+    }
+    match (appdir, current_exe) {
+        (Some(appdir), Some(exe)) => exe.starts_with(appdir),
+        _ => false,
+    }
+}
+
+/// Re-exec ourselves with WebKit's software renderer. Returns only on failure.
+///
+/// `/proc/self/exe`, not `$APPIMAGE`: the AppImage runtime already put the AppDir's
+/// `LD_LIBRARY_PATH` and `PATH` into this process and exec keeps them, while re-running
+/// the AppImage would mount a second copy of the bundle whose first mount can no longer
+/// be released — and the file may have been moved since launch (`install.sh` does that).
+#[cfg(target_os = "linux")]
+fn exec_software_render_retry() -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+
+    // `args_os`: a non-UTF-8 argument must not panic the retry.
+    let mut args = std::env::args_os();
+    let mut cmd = std::process::Command::new("/proc/self/exe");
+    if let Some(arg0) = args.next() {
+        cmd.arg0(arg0);
+    }
+    cmd.args(args);
+    // On the child only: `env::set_var` is unsound with other threads running, and
+    // clearing the environment would throw away the AppDir's library paths.
+    cmd.env("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+        .env(RETRY_MARKER, "1");
+
+    let failure = cmd.exec();
+    // `exec` sets up the child in *this* process before `execvp`, which includes resetting
+    // SIGPIPE to SIG_DFL, and it does not undo that when `execvp` fails. Left alone, the
+    // first SSH socket to close under a write would kill the app instead of erroring.
+    // SAFETY: restoring the disposition the Rust runtime installs at startup.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+    failure
+}
+
 fn main() {
     let builder = specta_builder();
 
@@ -128,6 +201,7 @@ fn main() {
         // document — stylesheet included — is up.
         .on_page_load(|webview, payload| {
             if matches!(payload.event(), PageLoadEvent::Finished) {
+                PAGE_LOADED.store(true, std::sync::atomic::Ordering::Release);
                 let window = webview.window();
                 // Reveal once: a later page load must not raise the window over
                 // whatever the user is doing.
@@ -151,6 +225,37 @@ fn main() {
                     if !window.is_visible().unwrap_or(false) {
                         let _ = window.show();
                     }
+                }
+            });
+
+            // Linux only: a window that never painted is usually the AppImage's bundled
+            // graphics stack losing to the host's. Retry once with software rendering —
+            // anything that rendered, or already retried, is left alone.
+            #[cfg(target_os = "linux")]
+            tauri::async_runtime::spawn(async {
+                tokio::time::sleep(RENDER_HEAL_DEADLINE).await;
+                // `current_exe` is already the kernel's resolved path, so resolve the
+                // AppDir too — a symlinked $TMPDIR would otherwise make the two
+                // uncomparable and silently disable the retry.
+                let appdir = std::env::var_os("APPDIR")
+                    .map(std::path::PathBuf::from)
+                    .map(|dir| std::fs::canonicalize(&dir).unwrap_or(dir));
+                let exe = std::env::current_exe().ok();
+                if should_retry_software_rendering(
+                    PAGE_LOADED.load(std::sync::atomic::Ordering::Acquire),
+                    appdir.as_deref(),
+                    exe.as_deref(),
+                    std::env::var_os(RETRY_MARKER).is_some(),
+                    // WebKit's own test: set, and not "0".
+                    std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER")
+                        .is_some_and(|value| value != "0"),
+                ) {
+                    eprintln!(
+                        "OmnySSH: the interface never loaded — restarting once with software rendering"
+                    );
+                    // `exec` returns only on failure; carry on with this process.
+                    let err = exec_software_render_retry();
+                    eprintln!("OmnySSH: the restart failed ({err}) — continuing as is");
                 }
             });
 
@@ -187,7 +292,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{export_bindings, BINDINGS_PATH};
+    use super::{export_bindings, should_retry_software_rendering, BINDINGS_PATH};
+    use std::path::Path;
 
     /// The committed bindings must match a fresh export — fails loudly on drift
     /// without mutating the tracked file (tech-gui.md §0.2 acceptance, §3.3).
@@ -203,5 +309,75 @@ mod tests {
             committed, generated,
             "ui/src/lib/bindings.ts is out of date — regenerate with `cargo tauri dev`"
         );
+    }
+
+    /// The retry exists for one case only: no page, inside our own AppImage, not already
+    /// retried. Everything else must launch exactly as it does today.
+    #[test]
+    fn the_software_render_retry_fires_once_inside_an_appimage() {
+        let appdir = Path::new("/tmp/.mount_OmnySSH");
+        let exe = appdir.join("usr/bin/OmnySSH");
+
+        assert!(should_retry_software_rendering(
+            false,
+            Some(appdir),
+            Some(&exe),
+            false,
+            false
+        ));
+        // The page arrived — there is nothing to heal.
+        assert!(!should_retry_software_rendering(
+            true,
+            Some(appdir),
+            Some(&exe),
+            false,
+            false
+        ));
+        // Already the retry, or the user asked for software rendering himself: a second
+        // restart would only loop.
+        assert!(!should_retry_software_rendering(
+            false,
+            Some(appdir),
+            Some(&exe),
+            true,
+            false
+        ));
+        assert!(!should_retry_software_rendering(
+            false,
+            Some(appdir),
+            Some(&exe),
+            false,
+            true
+        ));
+    }
+
+    /// A deb or rpm install must never restart itself. `$APPDIR` is inherited by anything
+    /// an AppImage launches, so where the binary actually lives is the check.
+    #[test]
+    fn the_software_render_retry_stays_out_of_native_installs() {
+        let appdir = Path::new("/tmp/.mount_OmnySSH");
+        let installed = Path::new("/usr/bin/OmnySSH");
+
+        assert!(!should_retry_software_rendering(
+            false,
+            Some(appdir),
+            Some(installed),
+            false,
+            false
+        ));
+        assert!(!should_retry_software_rendering(
+            false,
+            None,
+            Some(installed),
+            false,
+            false
+        ));
+        assert!(!should_retry_software_rendering(
+            false,
+            Some(appdir),
+            None,
+            false,
+            false
+        ));
     }
 }

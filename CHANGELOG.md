@@ -18,6 +18,10 @@ Versions follow [Semantic Versioning](https://semver.org/).
   - A bastion you renamed after importing it is still found by the alias other entries name it with.
   - One-click SSH key setup works for hosts behind a bastion: its verification steps now get the time the longer connection needs, and running out of time after password authentication has been disabled rolls the server back instead of reporting a clean failure.
   - Editing an imported host in the TUI no longer drops its `ProxyJump`: the form has no field for it, so the saved copy used to lose the bastion. The GUI already preserved it.
+- **The Linux AppImage retries a window that never paints.** On some graphics setups the webview the AppImage carries cannot start hardware rendering, so the app opened as an empty dark frame and stayed that way, with the error going to a terminal nobody launched it from. If the interface still has not loaded twelve seconds in, the AppImage now restarts itself once with software rendering. A launch that renders normally is untouched, and the retry never happens for the `.deb`, `.rpm`, macOS or Windows builds.
+
+### Packaging
+- **A native `.rpm` for Fedora and other RPM distributions.** Releases now carry `OmnySSH-x86_64.rpm` alongside the `.AppImage` and `.deb`, and `install.sh` prefers it on `dnf`-based systems — it lands in your application menu and uninstalls with `dnf remove`, no FUSE involved. The package names the WebKitGTK 4.1, JavaScriptCore and GTK 3 libraries it links, so `dnf` resolves them from your own distribution instead of the app carrying a second copy. Distributions that ship no WebKitGTK 4.1 at all, such as RHEL 9 and its rebuilds, will refuse the package; `install.sh` then tries the AppImage there.
 
 ---
 
