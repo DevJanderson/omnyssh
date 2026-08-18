@@ -391,14 +391,17 @@ install_gui_linux() {
     # AppImage ships (which black-screens on some Wayland setups). Fall back to
     # the portable AppImage everywhere else.
     if command -v rpm >/dev/null 2>&1 && command -v dnf >/dev/null 2>&1; then
-        download_release_asset "OmnySSH-${ARCH}.rpm" || return 1
-        print_info "Installing the .rpm package..."
-        sudo dnf install -y "$ASSET_PATH" || {
-            print_error "Failed to install the .rpm package"
-            return 1
-        }
-        print_success "OmnySSH installed. Launch it from your application menu."
-        return 0
+        if download_release_asset "OmnySSH-${ARCH}.rpm"; then
+            print_info "Installing the .rpm package..."
+            if sudo dnf install -y "$ASSET_PATH"; then
+                print_success "OmnySSH installed. Launch it from your application menu."
+                return 0
+            fi
+        fi
+        # A release that predates the .rpm, or a dnf host that has no WebKitGTK 4.1
+        # to satisfy it (RHEL 9 and its rebuilds), must not end the install here —
+        # the AppImage below still works.
+        print_warning "The .rpm is unavailable here — falling back to the AppImage"
     fi
 
     if command -v dpkg >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
