@@ -7,6 +7,20 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## Unreleased
+
+### Bug Fixes
+- **`ProxyJump` hosts now connect through their bastion.** A host with `ProxyJump` in `~/.ssh/config` was parsed but never routed: the terminal refused to open it, while metrics, SFTP, snippets and key setup quietly dialled the target address direct — which for an internal host meant every connection failed or, worse, landed somewhere else on that address. Every native SSH path now walks the jump chain the way `ssh -J` does, connecting and authenticating each bastion in turn and tunnelling the next hop over it.
+  - The jump alias is resolved against your host list, so `ProxyJump public-proxy` picks up that entry's `HostName`, `User`, `Port` and `IdentityFile`. An alias that matches no entry is used as a literal hostname.
+  - Multi-hop values (`ProxyJump first,second`), inline `user@host:port` overrides, IPv6 literals, bastions that are themselves behind a bastion, and the `ProxyJump none` opt-out all behave as OpenSSH does — including its precedence rule that only the first hop of a list contributes bastions of its own. Chains that loop, or run past ten hops, are reported instead of hanging.
+  - A `ProxyJump` that cannot be resolved — a malformed hop, an unreadable host list, a cycle — fails the connection. It never falls back to dialling the target address, which is the very thing that made the old behaviour dangerous.
+  - Each hop's host key is checked against `known_hosts` under its own name, and each hop authenticates with the usual agent → identity file → default keys → password order. Every hop, including the tunnel opened on a bastion, is bound by the same ten-second budget, so a firewalled target cannot leave a host stuck on "connecting".
+  - A bastion you renamed after importing it is still found by the alias other entries name it with.
+  - One-click SSH key setup works for hosts behind a bastion: its verification steps now get the time the longer connection needs, and running out of time after password authentication has been disabled rolls the server back instead of reporting a clean failure.
+  - Editing an imported host in the TUI no longer drops its `ProxyJump`: the form has no field for it, so the saved copy used to lose the bastion. The GUI already preserved it.
+
+---
+
 ## 1.1.1 — 2026-07-28
 
 ### Bug Fixes

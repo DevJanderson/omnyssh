@@ -14,13 +14,12 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use russh::client::Handle;
 use russh::ChannelMsg;
 use tokio::sync::mpsc;
 
 use crate::event::CoreEvent;
 use crate::ssh::client::Host;
-use crate::ssh::session::{connect_and_auth, KnownHostsHandler};
+use crate::ssh::session::{connect_and_auth, SshConnection};
 
 /// Stable numeric identifier for a PTY session (mirrors [`crate::event::SessionId`]).
 pub type SessionId = u64;
@@ -140,7 +139,7 @@ async fn forward_locale(channel: &russh::Channel<russh::client::Msg>) {
 
 /// Opens a channel and requests a remote PTY + shell (the `ssh -t` equivalent).
 async fn open_shell(
-    handle: &Handle<KnownHostsHandler>,
+    handle: &SshConnection,
     cols: u16,
     rows: u16,
 ) -> Result<russh::Channel<russh::client::Msg>> {
@@ -292,11 +291,6 @@ impl PtyManager {
         rows: u16,
         tx: mpsc::Sender<CoreEvent>,
     ) -> Result<SessionId> {
-        // ProxyJump is not yet wired into the russh terminal path. Refuse rather
-        // than silently connecting direct to the wrong host.
-        if host.proxy_jump.is_some() {
-            anyhow::bail!("ProxyJump is not yet supported in the terminal");
-        }
         let id = self.next_id;
         self.next_id += 1;
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));

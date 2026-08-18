@@ -451,6 +451,11 @@ impl App {
                             .map(|h| h.source == HostSource::SshConfig)
                             .unwrap_or(false);
 
+                        // ProxyJump has no form field, so carry it over: editing
+                        // an imported host would otherwise drop its bastion and
+                        // the saved copy would try to connect direct.
+                        host.proxy_jump = old_host.and_then(|h| h.proxy_jump.clone());
+
                         // If editing a SSH config host, preserve original name for duplicate prevention
                         if was_ssh_config && old_name.is_some() {
                             host.original_ssh_host = old_name.clone();
