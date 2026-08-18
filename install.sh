@@ -396,6 +396,11 @@ install_gui_linux() {
         if download_release_asset "OmnySSH-${ARCH}.rpm"; then
             print_info "Installing the .rpm package..."
             if sudo dnf install -y "$ASSET_PATH"; then
+                # The package brings its own binary and menu entry under different names
+                # than the AppImage this script installs, so an earlier AppImage would
+                # survive as a second launcher — the very build the user is escaping.
+                sudo rm -f "$INSTALL_DIR/omnyssh" || true
+                rm -f "$HOME/.local/share/applications/omnyssh.desktop" || true
                 print_success "OmnySSH installed. Launch it from your application menu."
                 return 0
             fi
