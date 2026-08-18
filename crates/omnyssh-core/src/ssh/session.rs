@@ -109,10 +109,12 @@ impl client::Handler for KnownHostsHandler {
 /// An authenticated russh connection to one host, plus the jump-host
 /// connections it is tunnelled through (empty for a direct connection).
 ///
-/// The jump handles are held for the whole lifetime of the connection: each one
-/// carries the `direct-tcpip` channel of the hop above it, so dropping a bastion
-/// handle would tear down everything beyond it. Derefs to the target's
-/// [`Handle`], so callers open channels on it exactly as before.
+/// The bastion handles are owned for the whole lifetime of the connection so
+/// the chain outlives nothing it carries. Teardown runs the other way: the
+/// target's session task holds the `direct-tcpip` stream of the hop below it,
+/// so dropping this struct closes the target first and cascades outward.
+/// Derefs to the target's [`Handle`], so callers open channels on it exactly as
+/// before.
 pub(crate) struct SshConnection {
     handle: Handle<KnownHostsHandler>,
     /// Bastions, nearest-first. Never used directly — kept alive by ownership.
@@ -278,13 +280,32 @@ pub(crate) async fn connect_and_auth(host: &Host) -> anyhow::Result<SshConnectio
     }
 
     let handle = match jumps.last() {
-        None => connect_direct(&config, host).await?,
-        Some(via) => connect_tunnelled(&config, via, host).await?,
-    };
+        None => connect_direct(&config, host).await,
+        Some(via) => connect_tunnelled(&config, via, host).await,
+    }
+    .with_context(|| match chain.last() {
+        None => format!("connecting to '{}' failed", host.name),
+        Some(last) => format!("connecting to '{}' via '{}' failed", host.name, last.name),
+    })?;
+
     Ok(SshConnection {
         handle,
         _jumps: jumps,
     })
+}
+
+/// Wall-clock budget one [`SshSession::connect`] needs for `host`: the per-hop
+/// connect timeout once for every bastion in its `ProxyJump` chain, plus the
+/// target.
+///
+/// Callers that wrap the connect in a timeout of their own must scale it by
+/// this — a fixed budget trips on a bastion chain before the connection has had
+/// the time [`connect_and_auth`] is entitled to.
+pub(crate) async fn connect_budget(host: &Host) -> Duration {
+    // A chain that fails to resolve costs nothing to connect; the caller's own
+    // attempt reports why.
+    let hops = jump_chain(host).await.map_or(0, |chain| chain.len());
+    CONNECT_TIMEOUT * (hops as u32 + 1)
 }
 
 /// The shared russh client configuration (timeouts + keepalives).
@@ -302,21 +323,29 @@ fn client_config() -> Arc<client::Config> {
 /// The jump aliases are looked up in the merged host list, so a bastion defined
 /// elsewhere in `~/.ssh/config` (or in `hosts.toml`) contributes its own
 /// HostName/User/Port/IdentityFile. Loading is skipped entirely for the common
-/// no-`ProxyJump` case, and an unreadable host list degrades to treating the
-/// alias as a literal hostname rather than failing the connection.
+/// no-`ProxyJump` case.
+///
+/// # Errors
+/// An unreadable host list, or a chain that cannot be resolved. Both fail the
+/// connection: resolving a bastion alias against nothing would fall back to
+/// dialling the alias as a hostname, which is a different machine.
 async fn jump_chain(host: &Host) -> anyhow::Result<Vec<Host>> {
-    if host.proxy_jump.is_none() {
+    if crate::ssh::jump::jump_value(host).is_none() {
         return Ok(Vec::new());
     }
     // load_all_hosts() is blocking file I/O — keep it off the async worker.
     let known = tokio::task::spawn_blocking(crate::config::load_all_hosts)
         .await
         .context("host list load panicked")?
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "could not load hosts for ProxyJump resolution");
-            Vec::new()
-        });
-    crate::ssh::jump::resolve_chain(host, &known)
+        .context("could not load hosts for ProxyJump resolution")?;
+
+    let chain = crate::ssh::jump::resolve_chain(host, &known)?;
+    tracing::debug!(
+        host = %host.name,
+        via = %chain.iter().map(|h| h.name.as_str()).collect::<Vec<_>>().join(" -> "),
+        "resolved ProxyJump chain"
+    );
+    Ok(chain)
 }
 
 /// Opens a TCP connection to `host` and authenticates.
@@ -346,10 +375,17 @@ async fn connect_tunnelled(
 ) -> anyhow::Result<Handle<KnownHostsHandler>> {
     // The originator address is informational; ssh(1) reports the loopback it
     // forwards from, and servers only log it.
-    let channel = via
-        .channel_open_direct_tcpip(host.hostname.clone(), host.port as u32, "127.0.0.1", 0)
-        .await
-        .with_context(|| format!("open tunnel to {}:{}", host.hostname, host.port))?;
+    //
+    // Timed out like the handshake it precedes: the bastion answers only once
+    // its own connect() to the target resolves, so a firewalled target would
+    // otherwise park the caller for the bastion's whole SYN budget.
+    let channel = time::timeout(
+        CONNECT_TIMEOUT,
+        via.channel_open_direct_tcpip(host.hostname.clone(), host.port as u32, "127.0.0.1", 0),
+    )
+    .await
+    .map_err(|_| anyhow!("SSH connection timed out (10 s)"))?
+    .with_context(|| format!("open tunnel to {}:{}", host.hostname, host.port))?;
 
     let handle = time::timeout(
         CONNECT_TIMEOUT,
