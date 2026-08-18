@@ -37,6 +37,17 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo fmt --check
 
+      # The bundlers name every artifact after the manifest version, and the collect
+      # steps check the bundles against it — so a tag that disagrees with the manifest
+      # would sail through all of that and publish the previous version's binaries.
+      - name: Tag matches the workspace version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          [ "$version" = "${GITHUB_REF_NAME#v}" ] ||
+            { echo "tag ${GITHUB_REF_NAME} does not match version $version"; exit 1; }
+
   # ── 2. Build release binaries ──────────────────────────────────────────────
   #
   # The four platforms are built in parallel and independently.
