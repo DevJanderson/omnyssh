@@ -8,20 +8,18 @@
 //! `~/.ssh/config` entries — so a jump alias inherits that entry's `HostName`,
 //! `User`, `Port` and `IdentityFile`, exactly like an `ssh -J` hop resolves
 //! through `ssh_config`. A hop that matches no known entry is used literally as
-//! a hostname. A hop with a `ProxyJump` of its own is expanded first, so nested
-//! bastions work.
+//! a hostname.
 //!
 //! Pure and I/O-free: [`resolve_chain`] takes the known hosts as an argument so
 //! it can be unit-tested without touching the filesystem.
 
-use std::collections::HashSet;
-
-use anyhow::bail;
+use anyhow::{bail, Context};
 
 use crate::ssh::client::Host;
 
-/// Upper bound on hops in a resolved chain. Longer chains are almost certainly
-/// a configuration mistake; the limit also bounds the expansion recursion.
+/// Upper bound on the hops in a resolved chain, and on the depth of the
+/// expansion recursion. Longer chains are almost certainly a configuration
+/// mistake.
 const MAX_HOPS: usize = 10;
 
 /// One hop parsed from a `ProxyJump` value: `[user@]host[:port]`.
@@ -30,6 +28,16 @@ struct JumpSpec {
     user: Option<String>,
     host: String,
     port: Option<u16>,
+}
+
+/// One chain walk in progress.
+struct Walk {
+    /// Hops resolved so far, in connection order.
+    chain: Vec<Host>,
+    /// Hops whose own `ProxyJump` is being expanded right now, plus the target
+    /// that started the walk. Re-entering one of these is a cycle; the length
+    /// is the recursion depth.
+    active: Vec<Host>,
 }
 
 /// Resolves the full jump chain for `target` against the `known` host list.
@@ -43,24 +51,27 @@ struct JumpSpec {
 /// flattened, so a caller connecting hop by hop must not expand it again.
 ///
 /// # Errors
-/// Returns an error when the chain references itself (a cycle) or exceeds
-/// [`MAX_HOPS`] hops — both would otherwise loop forever at connect time.
+/// Returns an error when a hop is unusable, when the chain references itself (a
+/// cycle), or when it exceeds [`MAX_HOPS`] hops. A host that names a bastion
+/// never resolves to an empty chain: failing is the only alternative to
+/// connecting straight to the target, past the bastion that is its only route.
 pub fn resolve_chain(target: &Host, known: &[Host]) -> anyhow::Result<Vec<Host>> {
     let Some(spec) = jump_value(target) else {
         return Ok(Vec::new());
     };
 
-    let mut chain: Vec<Host> = Vec::new();
-    let mut visited: HashSet<String> = HashSet::new();
-    // Seed with the target so `A -> B -> A` is caught as the cycle it is.
-    mark_visited(target, &mut visited);
-    expand(spec, known, &mut chain, &mut visited)?;
-    Ok(chain)
+    let mut walk = Walk {
+        chain: Vec::new(),
+        // Seed with the target so `A -> B -> A` is caught as the cycle it is.
+        active: vec![target.clone()],
+    };
+    walk.expand(spec, known)?;
+    Ok(walk.chain)
 }
 
 /// The effective `ProxyJump` value of `host`, or `None` when it connects
 /// directly. Blank values and the OpenSSH `none` opt-out both mean "direct".
-fn jump_value(host: &Host) -> Option<&str> {
+pub(crate) fn jump_value(host: &Host) -> Option<&str> {
     let value = host.proxy_jump.as_deref()?.trim();
     if value.is_empty() || value.eq_ignore_ascii_case("none") {
         None
@@ -69,32 +80,54 @@ fn jump_value(host: &Host) -> Option<&str> {
     }
 }
 
-/// Appends the hops of `spec` to `chain`, depth-first: a hop that jumps through
-/// another host contributes that host first.
-fn expand(
-    spec: &str,
-    known: &[Host],
-    chain: &mut Vec<Host>,
-    visited: &mut HashSet<String>,
-) -> anyhow::Result<()> {
-    for hop in parse_jump_spec(spec) {
-        let mut host = resolve_hop(&hop, known);
+impl Walk {
+    /// Appends the hops of `spec` to the chain, nearest hop first.
+    ///
+    /// Only the *first* hop of a list carries bastions of its own. That is what
+    /// `ssh` does: for `ProxyJump a,b` it reaches `b` with `-J a` on the command
+    /// line, and a command-line jump list makes it ignore `b`'s own configured
+    /// `ProxyJump`. `a` is then reached by a plain `ssh`, which does read its
+    /// `ProxyJump` — so nested bastions still work, one level in from each list.
+    fn expand(&mut self, spec: &str, known: &[Host]) -> anyhow::Result<()> {
+        let hops = parse_jump_spec(spec)?;
 
-        if !mark_visited(&host, visited) {
-            bail!("ProxyJump cycle detected at '{}'", host.name);
-        }
+        for (index, hop) in hops.iter().enumerate() {
+            let mut host = resolve_hop(hop, known);
 
-        // A bastion reached through another bastion: connect the inner one first.
-        if let Some(nested) = jump_value(&host) {
-            expand(nested, known, chain, visited)?;
+            if self.active.iter().any(|h| same_hop(h, &host)) {
+                bail!("ProxyJump cycle detected at '{}'", host.name);
+            }
+            // Already reached earlier in the chain: connecting it a second time
+            // would add a pointless hop, not close a loop.
+            if self.chain.iter().any(|h| same_hop(h, &host)) {
+                continue;
+            }
+
+            let nested = if index == 0 { jump_value(&host) } else { None };
+            if let Some(nested) = nested {
+                if self.active.len() > MAX_HOPS {
+                    bail!("ProxyJump chain nested deeper than {MAX_HOPS} hops");
+                }
+                self.active.push(host.clone());
+                let expanded = self.expand(nested, known);
+                self.active.pop();
+                expanded?;
+            }
+
+            if self.chain.len() >= MAX_HOPS {
+                bail!("ProxyJump chain longer than {MAX_HOPS} hops");
+            }
+            host.proxy_jump = None;
+            self.chain.push(host);
         }
-        if chain.len() >= MAX_HOPS {
-            bail!("ProxyJump chain longer than {MAX_HOPS} hops");
-        }
-        host.proxy_jump = None;
-        chain.push(host);
+        Ok(())
     }
-    Ok(())
+}
+
+/// Whether two hops are the same machine — the same alias, or the same
+/// endpoint reached under a second name.
+fn same_hop(a: &Host, b: &Host) -> bool {
+    a.name == b.name || (a.user == b.user && a.hostname == b.hostname && a.port == b.port)
 }
 
 /// Turns one parsed hop into a connectable [`Host`].
@@ -103,13 +136,27 @@ fn expand(
 /// else becomes a bare host with default user and port. An explicit `user@` or
 /// `:port` in the spec always wins over the inherited value.
 fn resolve_hop(spec: &JumpSpec, known: &[Host]) -> Host {
-    let mut host = match known.iter().find(|h| h.name == spec.host) {
+    // A host imported from `~/.ssh/config` and then renamed keeps its original
+    // alias, which is still what every other entry's `ProxyJump` names.
+    let entry = known.iter().find(|h| {
+        h.name == spec.host || h.original_ssh_host.as_deref() == Some(spec.host.as_str())
+    });
+
+    let mut host = match entry {
         Some(h) => h.clone(),
-        None => Host {
-            name: spec.host.clone(),
-            hostname: spec.host.clone(),
-            ..Host::default()
-        },
+        None => {
+            // Nothing to inherit. Worth a line: an alias that was meant to match
+            // an entry now resolves through DNS instead.
+            tracing::debug!(
+                hop = %spec.host,
+                "ProxyJump hop matches no known host; using it as a hostname"
+            );
+            Host {
+                name: spec.host.clone(),
+                hostname: spec.host.clone(),
+                ..Host::default()
+            }
+        }
     };
     if let Some(user) = &spec.user {
         host.user = user.clone();
@@ -125,36 +172,22 @@ fn resolve_hop(spec: &JumpSpec, known: &[Host]) -> Host {
     host
 }
 
-/// Records `host` as part of the chain being built, returning `false` when it
-/// was already there — a cycle.
-///
-/// A hop counts as seen both by alias and by endpoint, so a loop is caught
-/// whether it comes back under the same name or under a second alias for the
-/// same machine.
-fn mark_visited(host: &Host, visited: &mut HashSet<String>) -> bool {
-    let by_name = visited.insert(format!("name:{}", host.name));
-    let by_address = visited.insert(format!(
-        "address:{}@{}:{}",
-        host.user, host.hostname, host.port
-    ));
-    by_name && by_address
-}
-
 /// Splits a `ProxyJump` value into its comma-separated hops, nearest first.
 ///
-/// Unparseable hops (an empty entry, a non-numeric port) are skipped rather
-/// than failing the whole connection — the remaining hops still describe a
-/// usable route, and an unreachable one surfaces as a normal connection error.
-fn parse_jump_spec(value: &str) -> Vec<JumpSpec> {
-    value.split(',').filter_map(parse_hop).collect()
+/// # Errors
+/// An unusable hop fails the whole value. Dropping it would shorten the route,
+/// and dropping the only hop would connect straight to the target — past the
+/// bastion the value exists to name.
+fn parse_jump_spec(value: &str) -> anyhow::Result<Vec<JumpSpec>> {
+    value.split(',').map(parse_hop).collect()
 }
 
 /// Parses a single `[user@]host[:port]` hop. Bracketed IPv6 literals
 /// (`[2001:db8::1]:2222`) are supported, matching `ssh -J`.
-fn parse_hop(hop: &str) -> Option<JumpSpec> {
+fn parse_hop(hop: &str) -> anyhow::Result<JumpSpec> {
     let hop = hop.trim();
     if hop.is_empty() {
-        return None;
+        bail!("empty ProxyJump hop");
     }
 
     // Split on the last '@': a username cannot contain one, a host never does.
@@ -163,11 +196,12 @@ fn parse_hop(hop: &str) -> Option<JumpSpec> {
         _ => (None, hop),
     };
 
-    let (host, port) = split_host_port(rest)?;
+    let (host, port) =
+        split_host_port(rest).with_context(|| format!("unusable ProxyJump hop '{hop}'"))?;
     if host.is_empty() {
-        return None;
+        bail!("ProxyJump hop '{hop}' has no host");
     }
-    Some(JumpSpec {
+    Ok(JumpSpec {
         user,
         host: host.to_string(),
         port,
@@ -175,23 +209,34 @@ fn parse_hop(hop: &str) -> Option<JumpSpec> {
 }
 
 /// Splits `host`, `host:port`, `[v6]` or `[v6]:port` into its two parts.
-/// Returns `None` when a port is present but not a valid number.
-fn split_host_port(rest: &str) -> Option<(&str, Option<u16>)> {
+fn split_host_port(rest: &str) -> anyhow::Result<(&str, Option<u16>)> {
     // `end` indexes the ']' relative to the stripped string, i.e. the last
     // character of the address inside the brackets.
     if let Some(end) = rest.strip_prefix('[').and_then(|r| r.find(']')) {
         let host = &rest[1..=end];
-        return match rest[end + 2..].strip_prefix(':') {
-            Some(port) => Some((host, Some(port.parse().ok()?))),
-            None => Some((host, None)),
-        };
+        let trailer = &rest[end + 2..];
+        if trailer.is_empty() {
+            return Ok((host, None));
+        }
+        let port = trailer
+            .strip_prefix(':')
+            .with_context(|| format!("trailing '{trailer}' after ']'"))?;
+        return Ok((host, Some(parse_port(port)?)));
     }
     // An unbracketed colon separates the port only when it is the sole one;
     // a bare IPv6 literal has several and carries no port.
     match rest.split_once(':') {
-        Some((host, port)) if !port.contains(':') => Some((host, Some(port.parse().ok()?))),
-        Some(_) => Some((rest, None)),
-        None => Some((rest, None)),
+        Some((host, port)) if !port.contains(':') => Ok((host, Some(parse_port(port)?))),
+        _ => Ok((rest, None)),
+    }
+}
+
+/// Parses a hop's port. Zero is rejected the way `ssh` rejects it — it can
+/// never name a listening service.
+fn parse_port(value: &str) -> anyhow::Result<u16> {
+    match value.parse::<u16>() {
+        Ok(0) | Err(_) => bail!("'{value}' is not a valid port"),
+        Ok(port) => Ok(port),
     }
 }
 
@@ -219,12 +264,16 @@ mod tests {
         }
     }
 
+    fn names(chain: &[Host]) -> Vec<&str> {
+        chain.iter().map(|h| h.name.as_str()).collect()
+    }
+
     // --- spec parsing ------------------------------------------------------
 
     #[test]
     fn parses_a_bare_alias() {
         assert_eq!(
-            parse_jump_spec("bastion"),
+            parse_jump_spec("bastion").unwrap(),
             vec![JumpSpec {
                 user: None,
                 host: "bastion".into(),
@@ -236,7 +285,7 @@ mod tests {
     #[test]
     fn parses_user_host_and_port() {
         assert_eq!(
-            parse_jump_spec("ops@jump.example.com:2222"),
+            parse_jump_spec("ops@jump.example.com:2222").unwrap(),
             vec![JumpSpec {
                 user: Some("ops".into()),
                 host: "jump.example.com".into(),
@@ -247,7 +296,7 @@ mod tests {
 
     #[test]
     fn parses_a_multi_hop_value_in_order() {
-        let hops = parse_jump_spec("first, ops@second:2222");
+        let hops = parse_jump_spec("first, ops@second:2222").unwrap();
         assert_eq!(hops.len(), 2);
         assert_eq!(hops[0].host, "first");
         assert_eq!(hops[1].host, "second");
@@ -256,21 +305,38 @@ mod tests {
 
     #[test]
     fn parses_ipv6_literals() {
-        let bare = parse_jump_spec("2001:db8::1");
+        let bare = parse_jump_spec("2001:db8::1").unwrap();
         assert_eq!(bare[0].host, "2001:db8::1");
         assert_eq!(bare[0].port, None);
 
-        let bracketed = parse_jump_spec("ops@[2001:db8::1]:2222");
+        let bracketed = parse_jump_spec("ops@[2001:db8::1]:2222").unwrap();
         assert_eq!(bracketed[0].host, "2001:db8::1");
         assert_eq!(bracketed[0].port, Some(2222));
         assert_eq!(bracketed[0].user.as_deref(), Some("ops"));
+
+        assert_eq!(parse_jump_spec("[2001:db8::1]").unwrap()[0].port, None);
     }
 
     #[test]
-    fn skips_unusable_hops() {
-        assert!(parse_jump_spec("").is_empty());
-        assert!(parse_jump_spec(" , ").is_empty());
-        assert!(parse_jump_spec("host:not-a-port").is_empty());
+    fn rejects_unusable_hops() {
+        // Dropping any of these would silently shorten the route.
+        for value in [
+            "",
+            " , ",
+            "host:not-a-port",
+            "host:",
+            "host:70000",
+            "host:0",
+            "gw: 2222",
+            "ops@",
+            "[2001:db8::1]junk:22",
+            "first,bad:port",
+        ] {
+            assert!(
+                parse_jump_spec(value).is_err(),
+                "expected '{value}' to be rejected"
+            );
+        }
     }
 
     // --- chain resolution --------------------------------------------------
@@ -285,6 +351,14 @@ mod tests {
     fn proxy_jump_none_opts_out() {
         let target = jumping("web", "10.0.0.1", "none");
         assert!(resolve_chain(&target, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_malformed_value_fails_instead_of_connecting_direct() {
+        // The whole point of the module: never silently return an empty chain
+        // for a host that names a bastion.
+        let target = jumping("internal", "192.168.100.50", "public-proxy:22x");
+        assert!(resolve_chain(&target, &[]).is_err());
     }
 
     #[test]
@@ -332,6 +406,21 @@ Host internal
     }
 
     #[test]
+    fn a_renamed_bastion_is_still_found_under_its_original_alias() {
+        // Editing an imported host renames it and records the original; every
+        // other entry's ProxyJump still names the original.
+        let known = vec![Host {
+            original_ssh_host: Some("public-proxy".into()),
+            ..host("Prod Bastion", "proxy.example.com")
+        }];
+        let target = jumping("internal", "10.0.0.2", "public-proxy");
+        assert_eq!(
+            resolve_chain(&target, &known).unwrap()[0].hostname,
+            "proxy.example.com"
+        );
+    }
+
+    #[test]
     fn unknown_alias_falls_back_to_a_literal_host() {
         let target = jumping("internal", "10.0.0.2", "jump.example.com");
         let chain = resolve_chain(&target, &[]).unwrap();
@@ -373,8 +462,7 @@ Host internal
         let target = jumping("internal", "10.0.0.3", "first,second");
 
         let chain = resolve_chain(&target, &known).unwrap();
-        let names: Vec<&str> = chain.iter().map(|h| h.name.as_str()).collect();
-        assert_eq!(names, ["first", "second"]);
+        assert_eq!(names(&chain), ["first", "second"]);
     }
 
     #[test]
@@ -386,10 +474,55 @@ Host internal
         let target = jumping("internal", "10.0.0.3", "inner");
 
         let chain = resolve_chain(&target, &known).unwrap();
-        let names: Vec<&str> = chain.iter().map(|h| h.name.as_str()).collect();
-        assert_eq!(names, ["outer", "inner"]);
+        assert_eq!(names(&chain), ["outer", "inner"]);
         // Flattened: the caller connects hop by hop and must not re-expand.
         assert!(chain.iter().all(|h| h.proxy_jump.is_none()));
+    }
+
+    #[test]
+    fn only_the_first_hop_of_a_list_expands_its_own_bastion() {
+        // `ssh -J first,second` reaches `second` with the jump list on the
+        // command line, which outranks `second`'s configured ProxyJump.
+        let known = vec![
+            host("edge", "10.0.0.1"),
+            host("first", "10.0.0.2"),
+            jumping("second", "10.0.0.3", "edge"),
+        ];
+        let target = jumping("internal", "10.0.0.4", "first,second");
+        assert_eq!(
+            names(&resolve_chain(&target, &known).unwrap()),
+            ["first", "second"]
+        );
+
+        // …but the first hop's own bastion still applies.
+        let target = jumping("internal", "10.0.0.4", "second,first");
+        assert_eq!(
+            names(&resolve_chain(&target, &known).unwrap()),
+            ["edge", "second", "first"]
+        );
+    }
+
+    #[test]
+    fn a_hop_already_in_the_chain_is_not_a_cycle() {
+        // `edge` is both a hop of the list and `inner`'s own bastion. It is
+        // already connected by the time it comes round again — a duplicate to
+        // skip, not a loop to refuse.
+        let known = vec![
+            host("edge", "10.0.0.1"),
+            jumping("inner", "10.0.0.2", "edge"),
+        ];
+
+        let target = jumping("internal", "10.0.0.3", "inner,edge");
+        assert_eq!(
+            names(&resolve_chain(&target, &known).unwrap()),
+            ["edge", "inner"]
+        );
+
+        let target = jumping("internal", "10.0.0.3", "edge,inner");
+        assert_eq!(
+            names(&resolve_chain(&target, &known).unwrap()),
+            ["edge", "inner"]
+        );
     }
 
     #[test]
@@ -402,7 +535,7 @@ Host internal
 
     #[test]
     fn two_aliases_for_one_bastion_are_rejected() {
-        // Same machine, different name: still a loop, just a less obvious one.
+        // Same machine, different name: reaching it would require reaching it.
         let known = vec![
             jumping("proxy-a", "10.0.0.1", "proxy-b"),
             host("proxy-b", "10.0.0.1"),
@@ -419,14 +552,40 @@ Host internal
     }
 
     #[test]
-    fn an_over_long_chain_is_rejected() {
-        let hops: Vec<String> = (0..MAX_HOPS + 1).map(|i| format!("h{i}")).collect();
-        let known: Vec<Host> = hops
-            .iter()
-            .enumerate()
-            .map(|(i, name)| host(name, &format!("10.0.0.{i}")))
+    fn the_hop_limit_is_the_boundary_it_claims() {
+        let chain_of = |count: usize| {
+            let hops: Vec<String> = (0..count).map(|i| format!("h{i}")).collect();
+            let known: Vec<Host> = hops
+                .iter()
+                .enumerate()
+                .map(|(i, name)| host(name, &format!("10.0.0.{i}")))
+                .collect();
+            let target = jumping("internal", "10.1.0.1", &hops.join(","));
+            resolve_chain(&target, &known)
+        };
+
+        assert_eq!(chain_of(MAX_HOPS).unwrap().len(), MAX_HOPS);
+        assert!(chain_of(MAX_HOPS + 1).is_err());
+    }
+
+    #[test]
+    fn a_deeply_nested_chain_is_rejected_before_it_recurses_away() {
+        // Each entry jumps through the next, so the walk descends without ever
+        // appending to the chain — the depth bound is what has to catch it.
+        let known: Vec<Host> = (0..MAX_HOPS * 4)
+            .map(|i| {
+                jumping(
+                    &format!("h{i}"),
+                    &format!("10.0.0.{i}"),
+                    &format!("h{}", i + 1),
+                )
+            })
             .collect();
-        let target = jumping("internal", "10.1.0.1", &hops.join(","));
-        assert!(resolve_chain(&target, &known).is_err());
+        let target = jumping("internal", "10.1.0.1", "h0");
+
+        // The depth bound has to be what stops it: the chain-length bound reads
+        // a chain that is still empty this far down.
+        let err = resolve_chain(&target, &known).unwrap_err().to_string();
+        assert!(err.contains("nested deeper"), "unexpected error: {err}");
     }
 }
