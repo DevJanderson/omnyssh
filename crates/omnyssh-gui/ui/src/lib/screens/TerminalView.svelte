@@ -151,7 +151,7 @@
       ready = true;
       if (active) term.focus();
     })().catch((err) => {
-      // `terminal_open` itself failed (e.g. an unsupported ProxyJump host): no
+      // `terminal_open` itself failed (e.g. the session could not be spawned): no
       // PtyExited follows, so mark the tab failed here instead of leaving it hung.
       lastError.set(err instanceof Error ? err.message : String(err));
       sessions.setStatus(session.id, 'failed');

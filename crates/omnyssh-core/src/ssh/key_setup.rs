@@ -19,7 +19,7 @@ use tokio::time;
 use tracing::{error, info, warn};
 
 use crate::ssh::client::Host;
-use crate::ssh::session::SshSession;
+use crate::ssh::session::{self, SshSession};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -524,49 +524,69 @@ pub async fn setup_key_for_host(
         error_message: None,
     };
 
-    // Wrap the entire process in a timeout.
-    match time::timeout(
-        TOTAL_TIMEOUT,
-        setup_key_internal(host, password_session, key_type, &mut machine, progress_tx),
+    // The two verification steps reconnect, so they walk the host's ProxyJump
+    // chain like every other connect. A fixed budget would trip on a bastion
+    // before the connection had the time the engine grants it per hop.
+    let verify_timeout = STEP_TIMEOUT.max(session::connect_budget(host).await);
+    let total_timeout = TOTAL_TIMEOUT + verify_timeout.saturating_sub(STEP_TIMEOUT) * 2;
+
+    let error = match time::timeout(
+        total_timeout,
+        setup_key_internal(
+            host,
+            password_session,
+            key_type,
+            verify_timeout,
+            &mut machine,
+            progress_tx,
+        ),
     )
     .await
     {
         Ok(Ok(key_path)) => {
             result.key_path = key_path;
             result.state = machine.state().clone();
-            Ok(result)
+            return Ok(result);
         }
         Ok(Err(e)) => {
             error!("Key setup failed for {}: {}", host.name, e);
-            result.state = machine.state().clone();
-            result.error_message = Some(format!("{:#}", e));
-
-            // Attempt rollback if needed.
-            if matches!(machine.state(), KeySetupState::NeedsRollback) {
-                if let Err(rollback_err) = emergency_rollback(password_session).await {
-                    error!("Rollback failed: {}", rollback_err);
-                    result.error_message = Some(format!(
-                        "Setup failed AND rollback failed: {}\nRollback error: {}",
-                        e, rollback_err
-                    ));
-                } else {
-                    machine.rollback_complete();
-                    result.state = KeySetupState::RolledBack;
-                }
-            }
-
-            Err(e)
+            e
         }
         Err(_) => {
-            let err = anyhow!(
+            // Running out of time is only safe before the point of no return.
+            // Past it the server has password auth disabled, so the run needs
+            // the same rollback a failed final check would get.
+            let step = if machine.password_disabled {
+                KeySetupStep::FinalCheck
+            } else {
+                KeySetupStep::VerifyKeyAuth
+            };
+            machine.step_result(step, Err(anyhow!("timed out")));
+            anyhow!(
                 "Key setup timed out after {} seconds",
-                TOTAL_TIMEOUT.as_secs()
-            );
-            result.error_message = Some(err.to_string());
-            result.state = KeySetupState::FailedSafe;
-            Err(err)
+                total_timeout.as_secs()
+            )
+        }
+    };
+
+    result.state = machine.state().clone();
+    result.error_message = Some(format!("{:#}", error));
+
+    // Attempt rollback if needed.
+    if matches!(machine.state(), KeySetupState::NeedsRollback) {
+        if let Err(rollback_err) = emergency_rollback(password_session).await {
+            error!("Rollback failed: {}", rollback_err);
+            result.error_message = Some(format!(
+                "Setup failed AND rollback failed: {}\nRollback error: {}",
+                error, rollback_err
+            ));
+        } else {
+            machine.rollback_complete();
+            result.state = KeySetupState::RolledBack;
         }
     }
+
+    Err(error)
 }
 
 /// Internal implementation of the key setup process.
@@ -574,6 +594,7 @@ async fn setup_key_internal(
     host: &Host,
     password_session: &SshSession,
     key_type: KeyType,
+    verify_timeout: Duration,
     machine: &mut KeySetupMachine,
     progress_tx: Option<tokio::sync::mpsc::Sender<KeySetupStep>>,
 ) -> Result<PathBuf> {
@@ -641,7 +662,7 @@ async fn setup_key_internal(
     test_host.identity_file = Some(private_key_path.to_string_lossy().to_string());
     test_host.password = None; // Force key-only auth.
 
-    match time::timeout(STEP_TIMEOUT, SshSession::connect(&test_host)).await {
+    match time::timeout(verify_timeout, SshSession::connect(&test_host)).await {
         Ok(Ok(test_session)) => {
             info!("Key authentication verified successfully!");
             test_session.disconnect().await;
@@ -742,7 +763,7 @@ async fn setup_key_internal(
     if let Some(ref tx) = progress_tx {
         let _ = tx.send(KeySetupStep::FinalCheck).await;
     }
-    match time::timeout(STEP_TIMEOUT, SshSession::connect(&test_host)).await {
+    match time::timeout(verify_timeout, SshSession::connect(&test_host)).await {
         Ok(Ok(final_session)) => {
             info!("Final verification passed! Key setup complete.");
             final_session.disconnect().await;
