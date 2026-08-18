@@ -238,23 +238,51 @@ jobs:
         run: tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
       # Rename each produced bundle to its public release name (matches the README
-      # download table and the URLs install.sh builds).
+      # download table and the URLs install.sh builds). Those names carry no version, so
+      # each format is checked against the version this run built first — collect the
+      # wrong file and the release ships an old binary under a new tag, with nothing
+      # downstream (checksums included) able to tell the difference.
       - name: Collect bundles (Unix)
         if: runner.os != 'Windows'
+        shell: bash   # `-o pipefail`, so a failed `grep` below cannot pass as an empty version
         run: |
           out="target/${{ matrix.target }}/release/bundle"
-          for f in "$out"/dmg/*.dmg;           do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.dmg"; done
-          for f in "$out"/appimage/*.AppImage; do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.AppImage"; done
-          for f in "$out"/deb/*.deb;           do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.deb"; done
-          for f in "$out"/rpm/*.rpm;           do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.rpm"; done
+          version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          # An empty version would make the check below match anything.
+          [ -n "$version" ] || { echo "no version in Cargo.toml"; exit 1; }
+          collect() {
+            local files=("$out/$1"/*"$2")
+            [ -e "${files[0]}" ] || return 0   # this leg does not build the format
+            [ "${#files[@]}" -eq 1 ] || { echo "several $2 bundles: ${files[*]}"; exit 1; }
+            case "${files[0]}" in
+              *"$version"*) cp "${files[0]}" "$3" ;;
+              *) echo "${files[0]} is not $version"; exit 1 ;;
+            esac
+          }
+          collect dmg      .dmg      "${{ matrix.asset }}.dmg"
+          collect appimage .AppImage "${{ matrix.asset }}.AppImage"
+          collect deb      .deb      "${{ matrix.asset }}.deb"
+          collect rpm      .rpm      "${{ matrix.asset }}.rpm"
           ls -lh "${{ matrix.asset }}".*
 
       - name: Collect bundles (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $setup = Get-ChildItem "target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
-          Copy-Item $setup.FullName "${{ matrix.asset }}-setup.exe"
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' |
+                      Select-Object -First 1).Matches[0].Groups[1].Value
+          $setup = @(Get-ChildItem "target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe")
+          if ($setup.Count -ne 1) { throw "expected one installer, found $($setup.Count): $($setup.Name -join ', ')" }
+          if ($setup[0].Name -notlike "*$version*") { throw "$($setup[0].Name) is not $version" }
+
+          # Subsystem 3 (console) is what makes Windows open a terminal beside the
+          # window. Offset: PE signature (4) + COFF header (20) + 68 into the optional
+          # header, where the field sits in both PE32 and PE32+.
+          $exe = [IO.File]::ReadAllBytes("target/${{ matrix.target }}/release/OmnySSH.exe")
+          $subsystem = [BitConverter]::ToUInt16($exe, [BitConverter]::ToInt32($exe, 0x3C) + 92)
+          if ($subsystem -ne 2) { throw "OmnySSH.exe links as subsystem $subsystem, expected 2 (Windows GUI)" }
+
+          Copy-Item $setup[0].FullName "${{ matrix.asset }}-setup.exe"
           Get-ChildItem "${{ matrix.asset }}*"
 
       - name: Upload GUI artifact
