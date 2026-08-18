@@ -143,6 +143,9 @@ jobs:
           path: ${{ matrix.archive }}
           retention-days: 1
           if-no-files-found: error
+          # Re-running the whole workflow on a tag reuses these names; without this
+          # the upload conflicts with the failed attempt's artifact.
+          overwrite: true
 
   # ── 2b. Build the GUI desktop installers ───────────────────────────────────
   #
@@ -301,6 +304,7 @@ jobs:
           path: ${{ matrix.asset }}*
           retention-days: 1
           if-no-files-found: error
+          overwrite: true
 
   # ── 3. Create the GitHub Release and attach the binaries ───────────────────
   #
