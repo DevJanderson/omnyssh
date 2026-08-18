@@ -275,18 +275,16 @@ pub(crate) async fn connect_and_auth(host: &Host) -> anyhow::Result<SshConnectio
             None => connect_direct(&config, hop).await,
             Some(via) => connect_tunnelled(&config, via, hop).await,
         }
-        .with_context(|| format!("ProxyJump via '{}' failed", hop.name))?;
+        .map_err(|e| anyhow!("ProxyJump via '{}' failed: {e:#}", hop.name))?;
         jumps.push(handle);
     }
 
-    let handle = match jumps.last() {
-        None => connect_direct(&config, host).await,
-        Some(via) => connect_tunnelled(&config, via, host).await,
-    }
-    .with_context(|| match chain.last() {
-        None => format!("connecting to '{}' failed", host.name),
-        Some(last) => format!("connecting to '{}' via '{}' failed", host.name, last.name),
-    })?;
+    let handle = match (jumps.last(), chain.last()) {
+        (Some(via), Some(last)) => connect_tunnelled(&config, via, host)
+            .await
+            .map_err(|e| anyhow!("connecting via '{}' failed: {e:#}", last.name))?,
+        _ => connect_direct(&config, host).await?,
+    };
 
     Ok(SshConnection {
         handle,
@@ -337,7 +335,7 @@ async fn jump_chain(host: &Host) -> anyhow::Result<Vec<Host>> {
     let known = tokio::task::spawn_blocking(crate::config::load_all_hosts)
         .await
         .context("host list load panicked")?
-        .context("could not load hosts for ProxyJump resolution")?;
+        .map_err(|e| anyhow!("could not load hosts for ProxyJump resolution: {e:#}"))?;
 
     let chain = crate::ssh::jump::resolve_chain(host, &known)?;
     tracing::debug!(

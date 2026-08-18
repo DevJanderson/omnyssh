@@ -13,7 +13,7 @@
 //! Pure and I/O-free: [`resolve_chain`] takes the known hosts as an argument so
 //! it can be unit-tested without touching the filesystem.
 
-use anyhow::{bail, Context};
+use anyhow::{anyhow, bail, Context};
 
 use crate::ssh::client::Host;
 
@@ -195,7 +195,7 @@ fn parse_hop(hop: &str) -> anyhow::Result<JumpSpec> {
     };
 
     let (host, port) =
-        split_host_port(rest).with_context(|| format!("unusable ProxyJump hop '{hop}'"))?;
+        split_host_port(rest).map_err(|e| anyhow!("unusable ProxyJump hop '{hop}': {e:#}"))?;
     if host.is_empty() {
         bail!("ProxyJump hop '{hop}' has no host");
     }
