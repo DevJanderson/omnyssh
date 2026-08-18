@@ -1,25 +1,24 @@
 <script lang="ts">
-  // Self-update banner (tech-gui.md §4.3). Floats above the status bar whenever an update
-  // is available — from the startup `update-available` event or a manual check. Install
-  // runs the plugin-based self-update (functional once Stage 5 configures the updater
-  // endpoints; until then it reports "not available yet"). Skip persists the version to the
-  // shared config so it is never offered again; Dismiss hides it for this session only.
+  // Update banner (tech-gui.md §4.3). Floats above the status bar whenever an update is
+  // available — from the startup `update-available` event or a manual check. It opens the
+  // release page rather than self-updating: `plugins.updater` still ships with no endpoints
+  // (§3.7, Stage 5), so `install_update` cannot succeed on any platform, and a button that
+  // only ever reports a failure is worse than a download link. Skip persists the version to
+  // the shared config so it is never offered again; Dismiss hides it for this session only.
   import { Icon } from '$lib/theme';
   import { availableUpdate, dismissUpdate } from '$lib/stores/update';
-  import { installUpdate, loadUpdateConfig, saveUpdateConfig } from '$lib/ipc/commands';
+  import { loadUpdateConfig, saveUpdateConfig } from '$lib/ipc/commands';
+  import { openExternal } from '$lib/ipc/openExternal';
   import { lastError } from '$lib/stores/notifications';
 
   const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
   let busy = $state(false);
 
-  async function install(): Promise<void> {
-    busy = true;
+  async function download(url: string): Promise<void> {
     try {
-      await installUpdate();
+      await openExternal(url);
     } catch (e) {
       lastError.set(message(e));
-    } finally {
-      busy = false;
     }
   }
 
@@ -58,9 +57,9 @@
           type="button"
           class="{action} bg-accent text-accent-fg hover:opacity-90"
           disabled={busy}
-          onclick={install}
+          onclick={() => download(info.url)}
         >
-          Install
+          Download
         </button>
         <button
           type="button"
