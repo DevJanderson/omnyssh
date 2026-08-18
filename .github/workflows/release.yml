@@ -221,6 +221,13 @@ jobs:
         working-directory: crates/omnyssh-gui/ui
         run: npm ci
 
+      # The cache above restores the whole `target` tree, bundles an earlier run left
+      # behind included, and the bundler only ever adds to `bundle/`. Clear it so the
+      # collect steps can see nothing but what this run produces.
+      - name: Drop bundles left by an earlier run
+        shell: bash
+        run: rm -rf "target/${{ matrix.target }}/release/bundle"
+
       # `tauri build` runs the frontend build (beforeBuildCommand), compiles the
       # OmnySSH binary, and packages the requested bundles.
       - name: Build bundles
