@@ -97,12 +97,6 @@ impl Walk {
             if self.active.iter().any(|h| same_hop(h, &host)) {
                 bail!("ProxyJump cycle detected at '{}'", host.name);
             }
-            // Already reached earlier in the chain: connecting it a second time
-            // would add a pointless hop, not close a loop.
-            if self.chain.iter().any(|h| same_hop(h, &host)) {
-                continue;
-            }
-
             let nested = if index == 0 { jump_value(&host) } else { None };
             if let Some(nested) = nested {
                 if self.active.len() > MAX_HOPS {
@@ -125,7 +119,8 @@ impl Walk {
 }
 
 /// Whether two hops are the same machine — the same alias, or the same
-/// endpoint reached under a second name.
+/// endpoint reached under a second name. Only ever asked of hops still being
+/// expanded, so a match is a back-edge, not a repetition.
 fn same_hop(a: &Host, b: &Host) -> bool {
     a.name == b.name || (a.user == b.user && a.hostname == b.hostname && a.port == b.port)
 }
@@ -137,9 +132,12 @@ fn same_hop(a: &Host, b: &Host) -> bool {
 /// `:port` in the spec always wins over the inherited value.
 fn resolve_hop(spec: &JumpSpec, known: &[Host]) -> Host {
     // A host imported from `~/.ssh/config` and then renamed keeps its original
-    // alias, which is still what every other entry's `ProxyJump` names.
-    let entry = known.iter().find(|h| {
-        h.name == spec.host || h.original_ssh_host.as_deref() == Some(spec.host.as_str())
+    // alias, which is still what every other entry's `ProxyJump` names — but an
+    // entry that carries the alias as its own name comes first.
+    let entry = known.iter().find(|h| h.name == spec.host).or_else(|| {
+        known
+            .iter()
+            .find(|h| h.original_ssh_host.as_deref() == Some(spec.host.as_str()))
     });
 
     let mut host = match entry {
@@ -418,6 +416,19 @@ Host internal
             resolve_chain(&target, &known).unwrap()[0].hostname,
             "proxy.example.com"
         );
+
+        // An entry that owns the alias outright wins over one that used to.
+        let known = vec![
+            Host {
+                original_ssh_host: Some("public-proxy".into()),
+                ..host("Prod Bastion", "renamed.example.com")
+            },
+            host("public-proxy", "proxy.example.com"),
+        ];
+        assert_eq!(
+            resolve_chain(&target, &known).unwrap()[0].hostname,
+            "proxy.example.com"
+        );
     }
 
     #[test]
@@ -503,10 +514,11 @@ Host internal
     }
 
     #[test]
-    fn a_hop_already_in_the_chain_is_not_a_cycle() {
+    fn a_bastion_named_twice_is_not_a_cycle() {
         // `edge` is both a hop of the list and `inner`'s own bastion. It is
-        // already connected by the time it comes round again — a duplicate to
-        // skip, not a loop to refuse.
+        // already connected by the time it comes round again — a repetition,
+        // not a loop to refuse. `ssh` reaches the last hop of a list last, so
+        // the second mention keeps its place rather than being dropped.
         let known = vec![
             host("edge", "10.0.0.1"),
             jumping("inner", "10.0.0.2", "edge"),
@@ -515,7 +527,7 @@ Host internal
         let target = jumping("internal", "10.0.0.3", "inner,edge");
         assert_eq!(
             names(&resolve_chain(&target, &known).unwrap()),
-            ["edge", "inner"]
+            ["edge", "inner", "edge"]
         );
 
         let target = jumping("internal", "10.0.0.3", "edge,inner");
