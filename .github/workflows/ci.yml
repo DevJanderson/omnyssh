@@ -63,10 +63,77 @@ jobs:
         run: cargo test --verbose
 
       - name: Clippy (no warnings)
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Check formatting
         run: cargo fmt --check
+
+  # The workspace `default-members` keeps omnyssh-gui out of a bare `cargo build`
+  # (see `tui-build-independence` below), so nothing above ever compiles it. This
+  # job is where the GUI's own gates run — including the startup contract, whose
+  # whole point is to guard link-time settings no other test can reach.
+  gui:
+    name: GUI checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/omnyssh-gui/ui/package-lock.json
+
+      - name: Cache cargo registry
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # Deliberately outside the `${{ runner.os }}-cargo-` namespace: this job's
+          # target tree contains the GUI binary, and `tui-build-independence` restores
+          # by that prefix and fails when it finds one.
+          key: gui-ci-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            gui-ci-${{ runner.os }}-cargo-
+
+      # The pkg-config libraries behind gtk-sys and webkit2gtk-sys. The release job
+      # installs more, but those are the bundler's (icons, AppImage) and this job only
+      # compiles.
+      - name: Install GUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
+
+      - name: Install frontend dependencies
+        working-directory: crates/omnyssh-gui/ui
+        run: npm ci
+
+      - name: Frontend checks
+        working-directory: crates/omnyssh-gui/ui
+        run: |
+          npm run check
+          npm test
+
+      # `generate_context!` embeds the built frontend, so the crate does not compile
+      # until it exists. `tauri build` does this via beforeBuildCommand; plain cargo
+      # does not.
+      - name: Build the frontend
+        working-directory: crates/omnyssh-gui/ui
+        run: npm run build
+
+      - name: Clippy (no warnings)
+        run: cargo clippy -p omnyssh-gui --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test -p omnyssh-gui
 
   tui-build-independence:
     name: TUI builds without the GUI toolchain

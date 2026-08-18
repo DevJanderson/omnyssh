@@ -34,8 +34,19 @@ jobs:
           key: ci-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - run: cargo test --verbose
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo fmt --check
+
+      # The bundlers name every artifact after the manifest version, and the collect
+      # steps check the bundles against it — so a tag that disagrees with the manifest
+      # would sail through all of that and publish the previous version's binaries.
+      - name: Tag matches the workspace version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          [ "$version" = "${GITHUB_REF_NAME#v}" ] ||
+            { echo "tag ${GITHUB_REF_NAME} does not match version $version"; exit 1; }
 
   # ── 2. Build release binaries ──────────────────────────────────────────────
   #
@@ -143,6 +154,9 @@ jobs:
           path: ${{ matrix.archive }}
           retention-days: 1
           if-no-files-found: error
+          # Re-running the whole workflow on a tag reuses these names; without this
+          # the upload conflicts with the failed attempt's artifact.
+          overwrite: true
 
   # ── 2b. Build the GUI desktop installers ───────────────────────────────────
   #
@@ -221,6 +235,13 @@ jobs:
         working-directory: crates/omnyssh-gui/ui
         run: npm ci
 
+      # The cache above restores the whole `target` tree, bundles an earlier run left
+      # behind included, and the bundler only ever adds to `bundle/`. Clear it so the
+      # collect steps can see nothing but what this run produces.
+      - name: Drop bundles left by an earlier run
+        shell: bash
+        run: rm -rf "target/${{ matrix.target }}/release/bundle"
+
       # `tauri build` runs the frontend build (beforeBuildCommand), compiles the
       # OmnySSH binary, and packages the requested bundles.
       - name: Build bundles
@@ -231,23 +252,60 @@ jobs:
         run: tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
       # Rename each produced bundle to its public release name (matches the README
-      # download table and the URLs install.sh builds).
+      # download table and the URLs install.sh builds). Those names carry no version, so
+      # each format is checked against the version this run built first — collect the
+      # wrong file and the release ships an old binary under a new tag, with nothing
+      # downstream (checksums included) able to tell the difference.
       - name: Collect bundles (Unix)
         if: runner.os != 'Windows'
+        shell: bash   # `-o pipefail`, so a failed `grep` below cannot pass as an empty version
+        env:
+          BUNDLES: ${{ matrix.bundles }}
         run: |
           out="target/${{ matrix.target }}/release/bundle"
-          for f in "$out"/dmg/*.dmg;           do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.dmg"; done
-          for f in "$out"/appimage/*.AppImage; do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.AppImage"; done
-          for f in "$out"/deb/*.deb;           do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.deb"; done
-          for f in "$out"/rpm/*.rpm;           do [ -e "$f" ] && cp "$f" "${{ matrix.asset }}.rpm"; done
+          version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          # An empty version would make the check below match anything.
+          [ -n "$version" ] || { echo "no version in Cargo.toml"; exit 1; }
+          collect() {
+            local files=("$out/$1"/*"$2")
+            [ -e "${files[0]}" ] || { echo "no $2 bundle"; exit 1; }
+            [ "${#files[@]}" -eq 1 ] || { echo "several $2 bundles: ${files[*]}"; exit 1; }
+            case "${files[0]}" in
+              *"$version"*) cp "${files[0]}" "$3" ;;
+              *) echo "${files[0]} is not $version"; exit 1 ;;
+            esac
+          }
+          # Driven by the formats this leg asked `tauri build` for, so a bundler that
+          # stops emitting one fails the dry run instead of only the tag.
+          for format in ${BUNDLES//,/ }; do
+            case "$format" in
+              dmg)      collect dmg      .dmg      "${{ matrix.asset }}.dmg" ;;
+              appimage) collect appimage .AppImage "${{ matrix.asset }}.AppImage" ;;
+              deb)      collect deb      .deb      "${{ matrix.asset }}.deb" ;;
+              rpm)      collect rpm      .rpm      "${{ matrix.asset }}.rpm" ;;
+              *) echo "unknown bundle format: $format"; exit 1 ;;
+            esac
+          done
           ls -lh "${{ matrix.asset }}".*
 
       - name: Collect bundles (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $setup = Get-ChildItem "target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
-          Copy-Item $setup.FullName "${{ matrix.asset }}-setup.exe"
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' |
+                      Select-Object -First 1).Matches[0].Groups[1].Value
+          $setup = @(Get-ChildItem "target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe")
+          if ($setup.Count -ne 1) { throw "expected one installer, found $($setup.Count): $($setup.Name -join ', ')" }
+          if ($setup[0].Name -notlike "*$version*") { throw "$($setup[0].Name) is not $version" }
+
+          # Subsystem 3 (console) is what makes Windows open a terminal beside the
+          # window. Offset: PE signature (4) + COFF header (20) + 68 into the optional
+          # header, where the field sits in both PE32 and PE32+.
+          $exe = [IO.File]::ReadAllBytes("target/${{ matrix.target }}/release/OmnySSH.exe")
+          $subsystem = [BitConverter]::ToUInt16($exe, [BitConverter]::ToInt32($exe, 0x3C) + 92)
+          if ($subsystem -ne 2) { throw "OmnySSH.exe links as subsystem $subsystem, expected 2 (Windows GUI)" }
+
+          Copy-Item $setup[0].FullName "${{ matrix.asset }}-setup.exe"
           Get-ChildItem "${{ matrix.asset }}*"
 
       - name: Upload GUI artifact
@@ -257,20 +315,19 @@ jobs:
           path: ${{ matrix.asset }}*
           retention-days: 1
           if-no-files-found: error
+          overwrite: true
 
   # ── 3. Create the GitHub Release and attach the binaries ───────────────────
   #
-  # Runs whenever the TUI `build` job succeeded, even if `bundle-gui` failed: a
-  # flaky GUI leg then degrades to "TUI + whatever GUI bundles built" instead of
-  # blocking the whole release. The TUI archives are still required (a failed TUI
-  # leg fails `build` and skips this job).
+  # Both build jobs are required. README and install.sh address every asset by a
+  # fixed name, so a release missing one is a broken download link rather than a
+  # smaller release — better to fail the tag and re-run it.
   publish:
     name: Publish GitHub Release
     needs: [build, bundle-gui]
     # Only ever publish on a tag push — a manual dry run builds everything but
-    # skips this job. Runs whenever the TUI build succeeded, even if GUI bundling
-    # failed (a flaky GUI leg then degrades to a TUI-only release).
-    if: ${{ always() && needs.build.result == 'success' && startsWith(github.ref, 'refs/tags/') }}
+    # skips this job. `needs` already skips it when either build job failed.
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write   # required to create the Release
@@ -278,7 +335,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
-      # Download every artifact that exists (TUI archives + any GUI bundles).
+      # Download every artifact (TUI archives + GUI bundles).
       - name: Download all artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -291,11 +348,9 @@ jobs:
 
       # Generate SHA256SUMS with bare filenames so the in-app updater and
       # install.sh can verify a downloaded archive (TUI) or installer (GUI).
-      # `nullglob` so a missing GUI set (bundle-gui failed) doesn't error the glob.
       - name: Generate checksums
         run: |
           cd artifacts
-          shopt -s nullglob
           sha256sum omny-* OmnySSH-* > SHA256SUMS
           cat SHA256SUMS
 
@@ -313,10 +368,9 @@ jobs:
             echo 'CHANGELOG_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      # Attach the TUI archives + checksums plus whichever GUI installers built.
-      # `fail_on_unmatched_files: false` so a GUI bundle whose leg failed is
-      # skipped rather than aborting the release; the TUI archives are guaranteed
-      # present here (this job only runs when the `build` job succeeded).
+      # Attach the TUI archives, the GUI installers and the checksums. Every file
+      # below is required — a release that quietly drops one leaves the README's
+      # download links and install.sh pointing at nothing.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
         with:
@@ -324,7 +378,7 @@ jobs:
           body: ${{ steps.changelog.outputs.body }}
           draft: false
           prerelease: false
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true
           files: |
             artifacts/omny-x86_64-unknown-linux-gnu.tar.gz
             artifacts/omny-aarch64-unknown-linux-musl.tar.gz
